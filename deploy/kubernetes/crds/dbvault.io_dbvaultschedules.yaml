@@ -1,0 +1,38 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dbvaultschedules.dbvault.io
+spec:
+  group: dbvault.io
+  scope: Namespaced
+  names:
+    plural: dbvaultschedules
+    singular: dbvaultschedule
+    kind: DBVaultSchedule
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [sourceRef, operation, schedule]
+              properties:
+                sourceRef:
+                  type: object
+                  required: [name]
+                  properties:
+                    name: {type: string}
+                operation: {type: string}
+                schedule: {type: string}
+                timezone: {type: string}
+                concurrencyPolicy: {type: string, enum: [Allow, Forbid, Replace]}
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}

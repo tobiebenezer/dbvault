@@ -1,0 +1,23 @@
+services:
+  dbvault:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        RESTRICTED: "true"
+        VERSION: "0.1.0-alpha"
+    image: dbvault:0.1.0-alpha-demo
+    command: ["server", "--demo", "--listen", "0.0.0.0:8080", "--data-dir", "/var/lib/dbvault"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - dbvault-data:/var/lib/dbvault
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dbvault", "doctor"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  dbvault-data:

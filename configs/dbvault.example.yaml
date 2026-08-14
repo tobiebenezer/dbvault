@@ -1,0 +1,23 @@
+version: 1
+server:
+  data_directory: /var/lib/dbvault
+  scratch_directory: /var/lib/dbvault/scratch
+sources:
+  - id: application-db
+    driver: sqlite
+    path: /srv/application/data/application.sqlite
+repositories:
+  - id: production
+    primary: filesystem
+    retention:
+      keep_last: 4
+      daily: 7
+      weekly: 4
+      monthly: 3
+    budget:
+      maximum_repository_bytes: 8.5GiB
+      reserve_percent: 15
+destinations:
+  - id: filesystem
+    driver: filesystem
+    root: /var/lib/dbvault/repository

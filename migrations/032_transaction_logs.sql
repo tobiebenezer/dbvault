@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS transaction_logs (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    native_name TEXT NOT NULL,
+    start_position_json TEXT NOT NULL,
+    end_position_json TEXT NOT NULL,
+    start_time TEXT,
+    end_time TEXT,
+    timeline TEXT,
+    gtid_set TEXT,
+    object_key TEXT NOT NULL,
+    logical_size INTEGER NOT NULL,
+    stored_size INTEGER NOT NULL,
+    checksum TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    verified_at TEXT,
+    UNIQUE (lineage_id, native_name)
+) STRICT;

@@ -1,0 +1,14 @@
+.git
+bin
+*.zip
+/tmp
+.DS_Store
+node_modules
+web/node_modules
+coverage
+.env
+.envrc
+*.sqlite
+*.db
+repository
+scratch

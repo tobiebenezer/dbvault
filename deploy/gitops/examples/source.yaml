@@ -1,0 +1,18 @@
+apiVersion: dbvault.io/v1alpha1
+kind: DBVaultSource
+metadata:
+  name: application-postgres
+  namespace: databases
+spec:
+  engine: postgres
+  repositoryRef: {name: production}
+  connection:
+    host: postgres.database.svc.cluster.local
+    port: 5432
+    database: application
+    username: dbvault
+    passwordSecretRef: {name: postgres-backup-user, key: password}
+    sslMode: require
+  logicalBackup: {enabled: true, format: custom}
+  physicalBackup: {enabled: true}
+  wal: {enabled: true, mode: replication}

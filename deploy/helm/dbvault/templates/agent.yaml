@@ -1,0 +1,24 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-dbvault-agent
+spec:
+  selector:
+    matchLabels: {app: dbvault-agent}
+  template:
+    metadata:
+      labels: {app: dbvault-agent}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-dbvault
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["/usr/local/bin/dbvault-agent"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+{{- end }}

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: dbvault
+version: 0.7.0
+appVersion: "0.7.0"
+description: DBVault controller, operator and agent deployment scaffold

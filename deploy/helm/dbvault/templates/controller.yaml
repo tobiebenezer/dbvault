@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-dbvault-controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels: {app: dbvault-controller}
+  template:
+    metadata:
+      labels: {app: dbvault-controller}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-dbvault
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          command: ["/usr/local/bin/dbvault-controller"]
+          args: ["--listen", "{{ .Values.controller.listen }}"]
+          ports: [{name: http, containerPort: 8081}]
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            runAsUser: {{ .Values.securityContext.runAsUser }}
+            readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          readinessProbe: {httpGet: {path: /ready, port: http}}
+          livenessProbe: {httpGet: {path: /health, port: http}}

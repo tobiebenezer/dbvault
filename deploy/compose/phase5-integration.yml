@@ -1,0 +1,49 @@
+services:
+  postgres-primary:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dbvault
+      POSTGRES_DB: app
+    command: ["postgres", "-c", "wal_level=replica", "-c", "archive_mode=on", "-c", "archive_command=/bin/true"]
+  postgres-restore:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dbvault
+  mysql-primary:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: dbvault
+      MYSQL_DATABASE: app
+    command: ["--log-bin=mysql-bin", "--server-id=1", "--binlog-format=ROW"]
+  mysql-restore:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: dbvault
+  mariadb-primary:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: dbvault
+      MARIADB_DATABASE: app
+    command: ["--log-bin=mariadb-bin", "--server-id=2", "--binlog-format=ROW"]
+  mariadb-restore:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: dbvault
+  minio-primary:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+  minio-replica:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9011"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9010:9000", "9011:9001"]
+  webhook-receiver:
+    image: mendhak/http-https-echo:latest
+  smtp-test:
+    image: axllent/mailpit:latest

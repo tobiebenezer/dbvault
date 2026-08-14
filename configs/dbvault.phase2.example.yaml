@@ -1,0 +1,33 @@
+version: 2
+server:
+  data_directory: ./data
+  scratch_directory: ./data/scratch
+  listen: 127.0.0.1:8080
+catalogue:
+  path: ./data/dbvault.sqlite
+source:
+  id: source_local
+  name: local sqlite
+  driver: sqlite
+  enabled: true
+  path: /absolute/path/to/application.sqlite
+repository:
+  id: repo_local
+  name: local repository
+  key_id: local-key
+  chunk_bytes: 4MiB
+  retention:
+    keep_last: 4
+    daily: 7
+    weekly: 4
+    monthly: 3
+  budget_bytes: 8.5GiB
+destination:
+  id: filesystem
+  driver: filesystem
+  path: ./repository
+keys:
+  directory: ./data/keys
+schedule:
+  enabled: false
+  every_seconds: 21600

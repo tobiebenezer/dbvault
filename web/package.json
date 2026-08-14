@@ -1,0 +1,21 @@
+{
+  "name": "dbvault-web-console",
+  "version": "0.1.0-alpha.8i",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/build-web.mjs",
+    "test": "node ./scripts/test-web.mjs",
+    "dev": "node ./scripts/dev-server.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "autoprefixer": "^10.5.4",
+    "esbuild": "^0.28.2",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^3.4.19"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  }
+}

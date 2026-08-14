@@ -1,0 +1,20 @@
+version: 1
+recovery:
+  enabled: true
+  minimum_window: 7d
+postgres:
+  physical_backup:
+    enabled: true
+    strategy: full
+    format: tar
+  wal:
+    mode: archive_command
+mysql:
+  binlog:
+    enabled: true
+    mode: remote_streaming
+log_spool:
+  directory: /var/lib/dbvault/log-spool
+  maximum_bytes: 20GiB
+  minimum_free_bytes: 5GiB
+  maximum_age: 24h

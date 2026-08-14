@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  dbvault:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        RESTRICTED: "true"
+        VERSION: "0.1.0-alpha"
+    image: dbvault:0.1.0-alpha-dev
+    command: ["server", "--demo", "--listen", "0.0.0.0:8080", "--data-dir", "/var/lib/dbvault"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - dbvault-data:/var/lib/dbvault
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  minio-data:
+  dbvault-data:

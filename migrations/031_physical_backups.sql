@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS physical_backups (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    engine_version TEXT NOT NULL,
+    backup_type TEXT NOT NULL,
+    parent_backup_id TEXT,
+    start_position_json TEXT NOT NULL,
+    end_position_json TEXT NOT NULL,
+    timeline TEXT,
+    system_identifier TEXT,
+    manifest_digest TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    verified_at TEXT,
+    restore_tested_at TEXT
+) STRICT;

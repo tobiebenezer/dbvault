@@ -1,0 +1,29 @@
+name: alpha-check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  alpha:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Web test
+        run: make web-test
+      - name: Web build
+        run: make web-build
+      - name: Restricted tests
+        run: make test-restricted
+      - name: Build restricted binaries
+        run: CGO_ENABLED=0 go build -tags=restricted ./cmd/dbvault ./cmd/dbvaultd ./cmd/dbvault-controller ./cmd/dbvault-agent ./cmd/dbvault-operator
+      - name: Alpha smoke
+        run: make alpha-smoke

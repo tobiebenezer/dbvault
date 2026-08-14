@@ -1,0 +1,3 @@
+export DBVAULT_REPO=/var/lib/dbvault/repository
+export DBVAULT_SCRATCH=/var/lib/dbvault/scratch
+export DBVAULT_KEY_FILE=/run/secrets/dbvault_master_key

@@ -1,0 +1,18 @@
+[Unit]
+Description=DBVault backup daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=dbvault
+Group=dbvault
+ExecStart=/usr/local/bin/dbvaultd
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dbvault
+
+[Install]
+WantedBy=multi-user.target

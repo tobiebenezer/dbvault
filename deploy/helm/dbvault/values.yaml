@@ -1,0 +1,19 @@
+image:
+  repository: ghcr.io/dbvault/dbvault
+  tag: "0.7.0"
+  pullPolicy: IfNotPresent
+controller:
+  replicas: 2
+  listen: ":8081"
+operator:
+  replicas: 1
+agent:
+  enabled: true
+  mode: DaemonSet
+serviceAccount:
+  create: true
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  readOnlyRootFilesystem: true
+resources: {}

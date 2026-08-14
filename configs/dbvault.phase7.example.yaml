@@ -1,0 +1,117 @@
+version: 7
+server:
+  data_directory: /var/lib/dbvault
+  scratch_directory: /var/lib/dbvault/scratch
+  log_spool_directory: /var/lib/dbvault/log-spool
+  shutdown_grace: 30s
+  api: {enabled: true, listen: 127.0.0.1:8080}
+  metrics: {enabled: true, listen: 127.0.0.1:9090}
+catalogue:
+  driver: sqlite
+  path: /var/lib/dbvault/catalogue/dbvault.sqlite
+  sqlite: {journal_mode: WAL, synchronous: FULL, busy_timeout: 5s}
+secret_providers:
+  - id: local-files
+    driver: file
+    file:
+      root: /run/secrets/dbvault
+      reject_symlinks: true
+      require_mode: "0600"
+destinations:
+  - id: r2-primary
+    driver: s3
+    profile: cloudflare-r2
+    s3:
+      endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
+      region: auto
+      bucket: dbvault-production
+      prefix: organisation-a/project-one
+      addressing: {path_style: false}
+      credentials:
+        access_key_id: {provider: local-files, key: r2_access_key_id}
+        secret_access_key: {provider: local-files, key: r2_secret_access_key}
+      transport: {request_timeout: 2m, maximum_attempts: 5}
+      multipart: {threshold: 16MiB, part_size: 16MiB, concurrency: 4}
+  - id: contabo-replica
+    driver: s3
+    profile: contabo
+    s3:
+      endpoint: https://REGION.contabostorage.com
+      region: default
+      bucket: dbvault-replica
+      prefix: organisation-a/project-one
+      addressing: {path_style: true}
+      credentials:
+        access_key_id: {provider: local-files, key: contabo_access_key_id}
+        secret_access_key: {provider: local-files, key: contabo_secret_access_key}
+repositories:
+  - id: production
+    mode: primary_replica
+    primary: {destination: r2-primary}
+    replicas:
+      - {destination: contabo-replica, required_within: 12h}
+    encryption: {key_provider: local-files, active_key: production-key-2026-01}
+    signing: {key_provider: local-files, key_id: production-signing-2026-01}
+    compression: {algorithm: zstd, level: 6, minimum_savings_percent: 5}
+    chunking:
+      sqlite: {strategy: page-aligned, target_size: 4MiB}
+      streams: {strategy: fixed-stream-v1, target_size: 8MiB}
+    retention:
+      keep_last: 4
+      daily: 7
+      weekly: 4
+      monthly: 3
+      minimum_verified_snapshots: 2
+      tombstone_grace: 7d
+    budget: {maximum_physical_bytes: 8.5GiB, reserve_percent: 15, log_reserve_horizon: 6h}
+sources:
+  - id: application-sqlite
+    engine: sqlite
+    repository: production
+    sqlite: {path: /srv/application/data/application.sqlite, busy_timeout: 5m, pages_per_step: 256}
+  - id: application-postgres
+    engine: postgres
+    repository: production
+    postgres:
+      host: 127.0.0.1
+      port: 5432
+      database: application
+      username: dbvault
+      password: {provider: local-files, key: postgres_password}
+      ssl:
+        mode: verify-full
+        root_cert: /etc/dbvault/certificates/postgres-ca.pem
+        client_cert: /etc/dbvault/certificates/dbvault-client.pem
+        client_key: /run/secrets/dbvault/postgres_client_key
+      connect_timeout: 10s
+      logical_backup: {enabled: true, format: custom, include_globals: true, parallel_jobs: 4}
+      physical_backup: {enabled: true, strategy: full, full_every: 7d}
+      wal: {enabled: true, mode: replication, slot: dbvault_archive, publication_timeout: 2m}
+  - id: application-mysql
+    engine: mysql
+    repository: production
+    mysql:
+      host: 127.0.0.1
+      port: 3306
+      database: application
+      username: dbvault
+      password: {provider: local-files, key: mysql_password}
+      tls: {mode: verify_identity, ca_file: /etc/dbvault/certificates/mysql-ca.pem}
+      logical_backup: {enabled: true, single_transaction: true, quick: true, routines: true, triggers: true, events: true, non_transactional_policy: warn}
+      binlog: {enabled: true, mode: remote_stream, gtid: auto}
+schedules:
+  - {id: sqlite-six-hourly, source: application-sqlite, operation: logical_backup, cron: "0 */6 * * *", timezone: Africa/Lagos}
+  - {id: postgres-weekly-physical, source: application-postgres, operation: physical_backup, cron: "0 3 * * 0", timezone: Africa/Lagos}
+verification:
+  metadata_interval: 24h
+  sample_interval: 7d
+  full_interval: 30d
+  restore_drills: {enabled: true, schedule: "0 5 * * 0", timezone: Africa/Lagos}
+control_plane:
+  enabled: true
+  mode: production
+  organisation_id: organisation-a
+  project_id: project-one
+  environment_id: production
+  controller_endpoint: https://dbvault.example.com
+  agent_id: agent-production-1

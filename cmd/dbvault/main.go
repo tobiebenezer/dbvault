@@ -1,0 +1,821 @@
+package main
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/dbvault/dbvault/internal/adapters/catalogue/memory"
+	gzipc "github.com/dbvault/dbvault/internal/adapters/compression/gzip"
+	"github.com/dbvault/dbvault/internal/adapters/encryption/aead"
+	"github.com/dbvault/dbvault/internal/adapters/id"
+	keyfile "github.com/dbvault/dbvault/internal/adapters/keys/file"
+	ms "github.com/dbvault/dbvault/internal/adapters/manifest"
+	"github.com/dbvault/dbvault/internal/adapters/scratch"
+	"github.com/dbvault/dbvault/internal/adapters/source/mysql"
+	"github.com/dbvault/dbvault/internal/adapters/source/postgres"
+	"github.com/dbvault/dbvault/internal/adapters/source/sqlite"
+	"github.com/dbvault/dbvault/internal/adapters/storage/filesystem"
+	"github.com/dbvault/dbvault/internal/application/backup"
+	"github.com/dbvault/dbvault/internal/application/controlplane"
+	"github.com/dbvault/dbvault/internal/application/database"
+	"github.com/dbvault/dbvault/internal/application/productexperience"
+	"github.com/dbvault/dbvault/internal/bootstrap"
+	"github.com/dbvault/dbvault/internal/config"
+	"github.com/dbvault/dbvault/internal/domain"
+	installer "github.com/dbvault/dbvault/internal/install"
+	"github.com/dbvault/dbvault/internal/platform/controllerapi"
+	"github.com/dbvault/dbvault/internal/ports"
+	dbvserver "github.com/dbvault/dbvault/internal/server"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		return
+	}
+	switch os.Args[1] {
+	case "server":
+		serverCmd(os.Args[2:])
+	case "install":
+		installCmd(os.Args[2:])
+	case "upgrade":
+		upgradeCmd(os.Args[2:])
+	case "uninstall":
+		uninstallCmd(os.Args[2:])
+	case "agent":
+		agentCmd(os.Args[2:])
+	case "config":
+		configCmd(os.Args[2:])
+	case "key":
+		keyCmd(os.Args[2:])
+	case "source":
+		sourceCmd(os.Args[2:])
+	case "destination":
+		destinationCmd(os.Args[2:])
+	case "repository":
+		repositoryCmd(os.Args[2:])
+	case "backup-create":
+		backupCreate(os.Args[2:])
+	case "backup-list":
+		backupList(os.Args[2:])
+	case "restore-plan":
+		restorePlan(os.Args[2:])
+	case "restore-run":
+		restoreRun(os.Args[2:])
+	case "doctor":
+		doctor(os.Args[2:])
+	case "protection":
+		protectionCmd(os.Args[2:])
+	case "bundle":
+		bundleCmd(os.Args[2:])
+	case "engine":
+		engineCmd(os.Args[2:])
+	case "recovery":
+		recoveryCmd(os.Args[2:])
+	case "postgres":
+		postgresRecoveryCmd(os.Args[2:])
+	case "mysql":
+		mysqlRecoveryCmd(os.Args[2:])
+	default:
+		usage()
+	}
+}
+func usage() {
+	fmt.Println("dbvault commands: server, install, upgrade, uninstall, agent install|enrol|status, config validate|print-effective, source test|inspect, destination test|capabilities, repository explain, key generate, engine list|inspect, backup-create, backup-list, restore-plan, restore-run, recovery window|plan|verify-chain|drill, postgres wal|physical-backup|restore-point, mysql binlog, doctor, protection status, bundle support|recovery create")
+}
+func loadApp(configPath string) (*bootstrap.Application, error) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	return bootstrap.Build(context.Background(), cfg, slog.Default())
+}
+func configCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("config commands: validate, print-effective")
+		return
+	}
+	fs := flag.NewFlagSet("config", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	_ = fs.Parse(args[1:])
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Println("config error:", err)
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "validate":
+		fmt.Println("config OK")
+	case "print-effective":
+		b, marshalErr := config.MarshalRedactedJSON(cfg)
+		if marshalErr != nil {
+			fmt.Println(marshalErr)
+			os.Exit(1)
+		}
+		fmt.Println(string(b))
+	default:
+		fmt.Println("unknown config command")
+	}
+}
+func keyCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("key commands: generate")
+		return
+	}
+	fs := flag.NewFlagSet("key", flag.ExitOnError)
+	dir := fs.String("dir", "./data/keys", "key dir")
+	repo := fs.String("repository", "repo_local", "repository id")
+	keyID := fs.String("key-id", "local-key", "encryption key id")
+	_ = fs.Parse(args[1:])
+	switch args[0] {
+	case "generate":
+		if err := keyfile.New(*dir).Generate(*repo, *keyID); err != nil {
+			fmt.Println("key generate failed:", err)
+			os.Exit(1)
+		}
+		fmt.Println("keys generated in", *dir)
+	default:
+		fmt.Println("unknown key command")
+	}
+}
+func backupCreate(args []string) {
+	fs := flag.NewFlagSet("backup-create", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	sourcePath := fs.String("source", "", "legacy SQLite source path")
+	repoPath := fs.String("repo", "./repository", "legacy repository directory")
+	scratchPath := fs.String("scratch", "./scratch", "legacy scratch directory")
+	keyHex := fs.String("key", "", "legacy 32-byte hex or raw key string")
+	_ = fs.Parse(args)
+	if *cfgPath != "" {
+		app, err := loadApp(*cfgPath)
+		if err != nil {
+			fmt.Println("startup failed:", err)
+			os.Exit(1)
+		}
+		defer app.Close(context.Background())
+		src, err := domainSource(app.Binding)
+		if err != nil {
+			fmt.Println("source error:", err)
+			os.Exit(1)
+		}
+		res, err := app.Backup.Create(context.Background(), backup.Command{Source: src, Trigger: domain.TriggerManual})
+		if err != nil {
+			fmt.Println("backup failed:", err)
+			os.Exit(1)
+		}
+		printBackup(res)
+		return
+	}
+	legacyBackup(*sourcePath, *repoPath, *scratchPath, *keyHex)
+}
+func printBackup(res backup.Result) {
+	if res.Duplicate {
+		fmt.Println("duplicate snapshot:", res.Snapshot.ID)
+		return
+	}
+	fmt.Println("backup committed:", res.Snapshot.ID)
+	fmt.Println("manifest:", res.Snapshot.ManifestObjectKey)
+}
+func legacyBackup(sourcePath, repoPath, scratchPath, keyHex string) {
+	if sourcePath == "" || keyHex == "" {
+		fmt.Println("source and key are required")
+		os.Exit(2)
+	}
+	if !filepath.IsAbs(sourcePath) {
+		abs, _ := filepath.Abs(sourcePath)
+		sourcePath = abs
+	}
+	key := []byte(keyHex)
+	if decoded, err := hex.DecodeString(keyHex); err == nil && len(decoded) == 32 {
+		key = decoded
+	}
+	if len(key) < 32 {
+		p := make([]byte, 32)
+		copy(p, key)
+		key = p
+	}
+	if len(key) > 32 {
+		key = key[:32]
+	}
+	enc, err := aead.New(key)
+	if err != nil {
+		panic(err)
+	}
+	cat := memory.New()
+	store := filesystem.New(repoPath)
+	if err := store.Validate(context.Background()); err != nil {
+		panic(err)
+	}
+	repo := domain.Repository{ID: "repo_local", Name: "local", Mode: domain.RepositorySingle, PrimaryDestination: "filesystem", Encryption: domain.EncryptionPolicy{Algorithm: "aes-256-gcm", KeyID: "local-key"}}
+	svc := backup.Service{Catalogue: cat, Source: sqlite.New("sqlite3"), Store: store, Scratch: scratch.New(scratchPath), Compressor: gzipc.New(6), Encryptor: enc, Signer: ms.NewHMACSigner(key), Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: key, Repository: repo, TargetChunkBytes: 4 * 1024 * 1024}
+	source := domain.Source{ID: "source_local", Name: "local", Driver: "sqlite", Enabled: true, Path: sourcePath, RepositoryID: repo.ID}
+	res, err := svc.Create(context.Background(), backup.Command{Source: source, Trigger: domain.TriggerManual})
+	if err != nil {
+		fmt.Println("backup failed:", err)
+		os.Exit(1)
+	}
+	printBackup(res)
+}
+func backupList(args []string) {
+	fs := flag.NewFlagSet("backup-list", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	_ = fs.Parse(args)
+	app, err := loadApp(*cfgPath)
+	if err != nil {
+		fmt.Println("startup failed:", err)
+		os.Exit(1)
+	}
+	defer app.Close(context.Background())
+	snaps, err := app.Catalogue.ListSnapshots(context.Background(), "")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	for _, s := range snaps {
+		fmt.Printf("%s\t%s\t%d bytes\t%s\n", s.ID, s.Status, s.DatabaseSize, s.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	}
+}
+func restorePlan(args []string) {
+	fs := flag.NewFlagSet("restore-plan", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	snap := fs.String("snapshot", "", "snapshot id")
+	target := fs.String("target", "", "target path")
+	_ = fs.Parse(args)
+	app, err := loadApp(*cfgPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer app.Close(context.Background())
+	p, err := app.Restore.Plan(context.Background(), domain.SnapshotID(*snap), *target)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Printf("snapshot=%s size=%d chunks=%d overwrite_required=%v\n", p.SnapshotID, p.LogicalSize, p.ChunkCount, p.OverwriteRequired)
+}
+func restoreRun(args []string) {
+	fs := flag.NewFlagSet("restore-run", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	snap := fs.String("snapshot", "", "snapshot id")
+	target := fs.String("target", "", "target path")
+	replace := fs.Bool("replace", false, "replace target")
+	_ = fs.Parse(args)
+	app, err := loadApp(*cfgPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer app.Close(context.Background())
+	if err := app.Restore.Restore(context.Background(), domain.SnapshotID(*snap), *target, *replace); err != nil {
+		fmt.Println("restore failed:", err)
+		os.Exit(1)
+	}
+	fmt.Println("restore completed:", *target)
+}
+func doctor(args []string) {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	_ = fs.Parse(args)
+	if *cfgPath == "" {
+		fmt.Println("dbvault doctor: dependency-free Phase 2 build OK. Native SQLite and real S3 require production build tags/dependencies.")
+		return
+	}
+	app, err := loadApp(*cfgPath)
+	if err != nil {
+		fmt.Println("doctor failed:", err)
+		os.Exit(1)
+	}
+	defer app.Close(context.Background())
+	fmt.Println("doctor OK")
+}
+
+func engineCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("engine commands: list, inspect <engine>")
+		return
+	}
+	reg := database.NewRegistry(
+		postgres.New(nil, postgres.DefaultConfig()),
+		mysql.New(nil, mysql.DefaultConfig("mysql")),
+		mysql.New(nil, mysql.DefaultConfig("mariadb")),
+	)
+	switch args[0] {
+	case "list":
+		for _, d := range reg.List() {
+			fmt.Printf("%s\tapi=%d\tstreaming=%v\tparallel=%v\tglobals=%v\n", d.Engine, d.API, d.SupportsStreaming, d.SupportsParallel, d.SupportsGlobals)
+		}
+	case "inspect":
+		if len(args) < 2 {
+			fmt.Println("usage: dbvault engine inspect <postgres|mysql|mariadb>")
+			return
+		}
+		eng := domain.DatabaseEngine(args[1])
+		d, ok := reg.Get(eng)
+		if !ok {
+			fmt.Println("unknown engine:", args[1])
+			os.Exit(1)
+		}
+		desc := d.Descriptor()
+		fmt.Printf("engine=%s api=%d formats=%v modes=%v streaming=%v parallel=%v globals=%v\n", desc.Engine, desc.API, desc.SupportedFormats, desc.SupportedModes, desc.SupportsStreaming, desc.SupportsParallel, desc.SupportsGlobals)
+	default:
+		fmt.Println("unknown engine command")
+	}
+}
+
+func recoveryCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("recovery commands: window show, plan, verify-chain, drill")
+		return
+	}
+	switch args[0] {
+	case "window":
+		if len(args) >= 2 && args[1] == "show" {
+			fs := flag.NewFlagSet("recovery window show", flag.ExitOnError)
+			source := fs.String("source", "", "source id")
+			_ = fs.Parse(args[2:])
+			fmt.Printf("source=%s continuous=false windows=0 note=run Phase 5 collectors to calculate remote recovery windows\n", *source)
+			return
+		}
+	case "plan":
+		fs := flag.NewFlagSet("recovery plan", flag.ExitOnError)
+		source := fs.String("source", "", "source id")
+		target := fs.String("target-time", "", "RFC3339 recovery target time")
+		rp := fs.String("restore-point", "", "named restore point")
+		_ = fs.Parse(args[1:])
+		fmt.Printf("pitr plan source=%s target_time=%s restore_point=%s status=scaffolded\n", *source, *target, *rp)
+		return
+	case "verify-chain":
+		fs := flag.NewFlagSet("recovery verify-chain", flag.ExitOnError)
+		source := fs.String("source", "", "source id")
+		level := fs.String("level", "continuity", "verification level")
+		_ = fs.Parse(args[1:])
+		fmt.Printf("chain source=%s level=%s continuous=false status=scaffolded\n", *source, *level)
+		return
+	case "drill":
+		fs := flag.NewFlagSet("recovery drill", flag.ExitOnError)
+		source := fs.String("source", "", "source id")
+		target := fs.String("target", "random", "target selection")
+		_ = fs.Parse(args[1:])
+		fmt.Printf("pitr drill source=%s target=%s status=scaffolded\n", *source, *target)
+		return
+	}
+	fmt.Println("unknown recovery command")
+}
+
+func postgresRecoveryCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("postgres commands: physical-backup create, wal status|push|fetch|verify, restore-point create")
+		return
+	}
+	switch args[0] {
+	case "physical-backup":
+		if len(args) >= 2 && args[1] == "create" {
+			fs := flag.NewFlagSet("postgres physical-backup create", flag.ExitOnError)
+			source := fs.String("source", "", "source id")
+			typ := fs.String("type", "full", "full|incremental")
+			_ = fs.Parse(args[2:])
+			fmt.Printf("postgres physical backup source=%s type=%s status=scaffolded\n", *source, *typ)
+			return
+		}
+	case "wal":
+		if len(args) < 2 {
+			fmt.Println("postgres wal commands: status, push, fetch, verify")
+			return
+		}
+		fs := flag.NewFlagSet("postgres wal", flag.ExitOnError)
+		source := fs.String("source", "", "source id")
+		file := fs.String("file", "", "file path")
+		name := fs.String("name", "", "native WAL name")
+		target := fs.String("target", "", "target path")
+		_ = fs.Parse(args[2:])
+		fmt.Printf("postgres wal command=%s source=%s file=%s name=%s target=%s status=scaffolded\n", args[1], *source, *file, *name, *target)
+		return
+	case "restore-point":
+		if len(args) >= 2 && args[1] == "create" {
+			fs := flag.NewFlagSet("postgres restore-point create", flag.ExitOnError)
+			source := fs.String("source", "", "source id")
+			name := fs.String("name", "", "restore point name")
+			_ = fs.Parse(args[2:])
+			fmt.Printf("postgres restore point source=%s name=%s status=scaffolded\n", *source, *name)
+			return
+		}
+	}
+	fmt.Println("unknown postgres command")
+}
+
+func mysqlRecoveryCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("mysql commands: binlog status|verify")
+		return
+	}
+	if args[0] == "binlog" && len(args) >= 2 {
+		fs := flag.NewFlagSet("mysql binlog", flag.ExitOnError)
+		source := fs.String("source", "", "source id")
+		_ = fs.Parse(args[2:])
+		fmt.Printf("mysql binlog command=%s source=%s status=scaffolded\n", args[1], *source)
+		return
+	}
+	fmt.Println("unknown mysql command")
+}
+
+func domainSource(binding config.RuntimeBinding) (domain.Source, error) {
+	source := binding.Source
+	if source.Engine != "sqlite" || source.SQLite == nil {
+		return domain.Source{}, fmt.Errorf("source %s uses %s; this standalone backup command currently executes SQLite while native database jobs use the driver platform", source.ID, source.Engine)
+	}
+	return domain.Source{ID: domain.SourceID(source.ID), Name: source.ID, Driver: source.Engine, Enabled: source.IsEnabled(), Path: source.SQLite.Path, RepositoryID: domain.RepositoryID(source.Repository)}, nil
+}
+
+func sourceCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("source commands: test, inspect")
+		return
+	}
+	fs := flag.NewFlagSet("source", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	id := fs.String("id", "", "source id")
+	_ = fs.Parse(args[1:])
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Println("config error:", err)
+		os.Exit(1)
+	}
+	binding, err := cfg.Binding(*id)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "inspect":
+		b, _ := json.MarshalIndent(binding.Source, "", "  ")
+		fmt.Println(string(b))
+	case "test":
+		if err := testSource(cfg, binding.Source); err != nil {
+			fmt.Println("source test failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("source %s connection configuration is reachable and its secret reference resolves\n", binding.Source.ID)
+	default:
+		fmt.Println("unknown source command")
+	}
+}
+
+func testSource(cfg config.Config, source config.SourceConfig) error {
+	switch source.Engine {
+	case "sqlite":
+		if source.SQLite == nil {
+			return fmt.Errorf("sqlite configuration missing")
+		}
+		info, err := os.Stat(source.SQLite.Path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("sqlite path is not a regular file")
+		}
+		return nil
+	case "postgres":
+		if source.Postgres == nil {
+			return fmt.Errorf("postgres configuration missing")
+		}
+		if _, err := cfg.ResolveSecret(source.Postgres.Password, false); err != nil {
+			return fmt.Errorf("password: %w", err)
+		}
+		return dialDatabase(source.Postgres.Host, source.Postgres.Port)
+	case "mysql", "mariadb":
+		if source.MySQL == nil {
+			return fmt.Errorf("mysql configuration missing")
+		}
+		if _, err := cfg.ResolveSecret(source.MySQL.Password, false); err != nil {
+			return fmt.Errorf("password: %w", err)
+		}
+		return dialDatabase(source.MySQL.Host, source.MySQL.Port)
+	default:
+		return fmt.Errorf("unsupported engine %s", source.Engine)
+	}
+}
+
+func dialDatabase(host string, port int) error {
+	connection, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(port)), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	return connection.Close()
+}
+
+func destinationCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("destination commands: test, capabilities")
+		return
+	}
+	fs := flag.NewFlagSet("destination", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	id := fs.String("id", "", "destination id")
+	_ = fs.Parse(args[1:])
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Println("config error:", err)
+		os.Exit(1)
+	}
+	var destination config.DestinationConfig
+	for _, candidate := range cfg.Destinations {
+		if candidate.ID == *id || (*id == "" && destination.ID == "") {
+			destination = candidate
+		}
+	}
+	if destination.ID == "" {
+		fmt.Println("destination not found")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "capabilities":
+		fmt.Printf("destination=%s driver=%s profile=%s multipart=%v path_style=%v conditional_create=%s\n", destination.ID, destination.Driver, destination.Profile, destination.S3 != nil, destination.S3 != nil && destination.S3.Addressing.PathStyle, inferredConditionalCreate(destination))
+	case "test":
+		if err := testDestination(cfg, destination); err != nil {
+			fmt.Println("destination test failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("destination %s configuration and endpoint are reachable\n", destination.ID)
+	default:
+		fmt.Println("unknown destination command")
+	}
+}
+
+func inferredConditionalCreate(destination config.DestinationConfig) string {
+	if destination.S3 != nil && destination.S3.CapabilityHints.ConditionalCreate != nil {
+		return fmt.Sprint(*destination.S3.CapabilityHints.ConditionalCreate)
+	}
+	switch destination.Profile {
+	case "cloudflare-r2", "minio":
+		return "probe"
+	case "contabo":
+		return "conservative"
+	default:
+		return "probe"
+	}
+}
+
+func testDestination(cfg config.Config, destination config.DestinationConfig) error {
+	switch destination.Driver {
+	case "filesystem":
+		if destination.Filesystem == nil {
+			return fmt.Errorf("filesystem configuration missing")
+		}
+		if err := os.MkdirAll(destination.Filesystem.Root, 0700); err != nil {
+			return err
+		}
+		probe := filepath.Join(destination.Filesystem.Root, ".dbvault-configuration-probe")
+		if err := os.WriteFile(probe, []byte("ok"), 0600); err != nil {
+			return err
+		}
+		return os.Remove(probe)
+	case "s3":
+		if destination.S3 == nil {
+			return fmt.Errorf("s3 configuration missing")
+		}
+		if _, err := cfg.ResolveSecret(destination.S3.Credentials.AccessKeyID, false); err != nil {
+			return fmt.Errorf("access key: %w", err)
+		}
+		if _, err := cfg.ResolveSecret(destination.S3.Credentials.SecretAccessKey, false); err != nil {
+			return fmt.Errorf("secret key: %w", err)
+		}
+		u, err := url.Parse(destination.S3.Endpoint)
+		if err != nil {
+			return err
+		}
+		port := u.Port()
+		if port == "" {
+			if strings.EqualFold(u.Scheme, "https") {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		connection, err := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), port), 5*time.Second)
+		if err != nil {
+			return err
+		}
+		return connection.Close()
+	default:
+		return fmt.Errorf("unsupported driver %s", destination.Driver)
+	}
+}
+
+func repositoryCmd(args []string) {
+	if len(args) == 0 || args[0] != "explain" {
+		fmt.Println("repository command: explain")
+		return
+	}
+	fs := flag.NewFlagSet("repository explain", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	id := fs.String("id", "", "repository id")
+	_ = fs.Parse(args[1:])
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if *id == "" && len(cfg.Repositories) > 0 {
+		*id = cfg.Repositories[0].ID
+	}
+	explanation, err := cfg.ExplainRepository(*id)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Println(explanation)
+}
+
+func serverCmd(args []string) {
+	fs := flag.NewFlagSet("server", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "config path")
+	listen := fs.String("listen", "", "listen address")
+	publicURL := fs.String("public-url", "", "public URL")
+	dataDir := fs.String("data-dir", "/var/lib/dbvault", "data directory")
+	setupToken := fs.String("setup-token", "", "setup token path")
+	token := fs.String("token", os.Getenv("DBVAULT_CONTROLLER_TOKEN"), "API bearer token")
+	demo := fs.Bool("demo", false, "start with safe demo data and no external credentials")
+	_ = fs.Parse(args)
+	if *cfgPath != "" {
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "config error:", err)
+			os.Exit(1)
+		}
+		cfg.Normalize()
+		if *listen == "" {
+			*listen = cfg.Server.Listen
+		}
+		if *dataDir == "/var/lib/dbvault" && cfg.Server.DataDirectory != "" {
+			*dataDir = cfg.Server.DataDirectory
+		}
+	}
+	api := controllerapi.New(controlplane.NewStore(), *token).Handler()
+	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev"}, api, slog.Default())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if token, err := appliance.EnsureSetupToken(); err == nil && token != "" {
+		fmt.Println("setup token:", token)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if *demo {
+		fmt.Println("demo mode enabled: sample protection, alert, timeline and sandbox data are served without credentials")
+	}
+	fmt.Println("DBVault appliance server listening on", appliance.HTTPServer().Addr)
+	if err := dbvserver.Run(ctx, appliance); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func installCmd(args []string) {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	root := fs.String("root", "/", "installation root")
+	domain := fs.String("domain", "", "public domain or URL")
+	selfSigned := fs.Bool("self-signed", false, "use self-signed TLS mode")
+	offline := fs.String("offline-bundle", "", "offline release bundle")
+	dryRun := fs.Bool("dry-run", false, "print plan without writing")
+	force := fs.Bool("force", false, "overwrite compatible generated files")
+	_ = fs.Parse(args)
+	res, err := installer.Apply(installer.Options{Root: *root, Domain: *domain, SelfSigned: *selfSigned, OfflineBundle: *offline, DryRun: *dryRun, Force: *force})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "install failed:", err)
+		os.Exit(1)
+	}
+	for _, step := range res.Steps {
+		fmt.Printf("%s\t%s\n", step.Status, step.Name)
+	}
+	if *dryRun {
+		fmt.Println("dry-run complete; no files written")
+		return
+	}
+	fmt.Println("setup URL:", res.SetupURL)
+	fmt.Println("setup token:", res.SetupToken)
+	fmt.Println("config:", res.ConfigPath)
+	fmt.Println("systemd unit:", res.UnitPath)
+}
+
+func upgradeCmd(args []string) {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	check := fs.Bool("check", false, "check only")
+	rollback := fs.Bool("rollback", false, "rollback to previous version")
+	target := fs.String("target", "latest", "target version")
+	_ = fs.Parse(args)
+	if *rollback {
+		fmt.Println("upgrade rollback plan: stop service, restore previous binary, restore compatible config, restart service")
+		return
+	}
+	plan := installer.PlanUpgrade("current", *target)
+	if *check {
+		fmt.Println("upgrade available check scaffold; target", *target)
+	}
+	for _, step := range plan.Steps {
+		fmt.Println(step)
+	}
+}
+
+func uninstallCmd(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	purge := fs.Bool("purge-data", false, "remove /var/lib/dbvault and /etc/dbvault")
+	_ = fs.Parse(args)
+	plan := installer.PlanUninstall(*purge)
+	for _, step := range plan.Steps {
+		fmt.Println(step)
+	}
+	if !*purge {
+		fmt.Println("data and configuration are preserved by default")
+	}
+}
+
+func agentCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Println("agent commands: install, enrol, status")
+		return
+	}
+	fs := flag.NewFlagSet("agent", flag.ExitOnError)
+	controller := fs.String("controller", "", "controller URL")
+	token := fs.String("token", "", "one-time enrolment token")
+	_ = fs.Parse(args[1:])
+	switch args[0] {
+	case "install":
+		fmt.Printf("agent install plan controller=%s token_present=%v stages=create-user,install-binary,write-service,enrol,start,verify\n", *controller, *token != "")
+	case "enrol":
+		fmt.Printf("agent enrol controller=%s token_present=%v status=scaffolded\n", *controller, *token != "")
+	case "status":
+		fmt.Println("agent status: local appliance agent scaffold ready")
+	default:
+		fmt.Println("unknown agent command")
+	}
+}
+
+func protectionCmd(args []string) {
+	if len(args) == 0 || args[0] != "status" {
+		fmt.Println("protection command: status --source <id> --data-dir <dir>")
+		return
+	}
+	fs := flag.NewFlagSet("protection status", flag.ExitOnError)
+	source := fs.String("source", "production-postgres", "source id")
+	dataDir := fs.String("data-dir", filepath.Join(os.TempDir(), "dbvault-product-experience"), "data dir")
+	output := fs.String("output", "text", "text|json")
+	_ = fs.Parse(args[1:])
+	svc, err := productexperience.New(filepath.Join(*dataDir, "product-experience"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	status := svc.ProtectionSummary(context.Background(), domain.SourceID(*source))
+	if *output == "json" {
+		_ = json.NewEncoder(os.Stdout).Encode(status)
+		return
+	}
+	fmt.Printf("source=%s status=%s score=%d summary=%s\n", status.SourceID, status.Status, status.Score, status.Summary)
+	for _, action := range status.SuggestedActions {
+		fmt.Printf("action=%s safe=%v\n", action.Label, action.Safe)
+	}
+}
+
+func bundleCmd(args []string) {
+	if len(args) < 2 || args[1] != "create" {
+		fmt.Println("bundle commands: support create --data-dir <dir>, recovery create --data-dir <dir>")
+		return
+	}
+	fs := flag.NewFlagSet("bundle", flag.ExitOnError)
+	dataDir := fs.String("data-dir", filepath.Join(os.TempDir(), "dbvault-product-experience"), "data dir")
+	_ = fs.Parse(args[2:])
+	svc, err := productexperience.New(filepath.Join(*dataDir, "product-experience"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var path string
+	switch args[0] {
+	case "support":
+		path, err = svc.CreateSupportBundle(context.Background())
+	case "recovery":
+		path, err = svc.CreateRecoveryBundle(context.Background())
+	default:
+		fmt.Println("unknown bundle type")
+		return
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(path)
+}

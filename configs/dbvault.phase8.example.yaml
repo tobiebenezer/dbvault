@@ -1,0 +1,106 @@
+version: 1
+
+server:
+  data_directory: /var/lib/dbvault
+  scratch_directory: /var/lib/dbvault/scratch
+  log_spool_directory: /var/lib/dbvault/log-spool
+  listen: 0.0.0.0:443
+  public_url: https://backup.example.com
+  tls:
+    mode: self_signed
+
+catalogue:
+  driver: sqlite
+  path: /var/lib/dbvault/catalogue/dbvault.sqlite
+
+secret_providers:
+  - id: local-files
+    driver: file
+    file:
+      root: /run/secrets/dbvault
+
+destinations:
+  - id: r2-primary
+    driver: s3
+    profile: cloudflare-r2
+    s3:
+      endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
+      region: auto
+      bucket: dbvault-production
+      prefix: company-a
+      addressing:
+        path_style: false
+      credentials:
+        access_key_id:
+          provider: local-files
+          key: r2_access_key_id
+        secret_access_key:
+          provider: local-files
+          key: r2_secret_access_key
+  - id: contabo-replica
+    driver: s3
+    profile: contabo
+    s3:
+      endpoint: https://REGION.contabostorage.com
+      region: default
+      bucket: dbvault-replica
+      prefix: company-a
+      addressing:
+        path_style: true
+      credentials:
+        access_key_id:
+          provider: local-files
+          key: contabo_access_key_id
+        secret_access_key:
+          provider: local-files
+          key: contabo_secret_access_key
+
+repositories:
+  - id: production
+    mode: primary_replica
+    primary:
+      destination: r2-primary
+    replicas:
+      - destination: contabo-replica
+        required_within: 12h
+    encryption:
+      key_provider: local-files
+      active_key: production-key-2026-01
+    signing:
+      key_provider: local-files
+      key_id: production-signing-2026-01
+    compression:
+      algorithm: zstd
+      level: 6
+      minimum_savings_percent: 5
+    retention:
+      keep_last: 4
+      daily: 7
+      weekly: 4
+      monthly: 3
+
+sources:
+  - id: application-postgres
+    engine: postgres
+    repository: production
+    postgres:
+      host: 127.0.0.1
+      port: 5432
+      database: application
+      username: dbvault
+      password:
+        provider: local-files
+        key: postgres_password
+      logical_backup:
+        enabled: true
+        format: custom
+      wal:
+        enabled: true
+        mode: replication
+
+schedules:
+  - id: postgres-daily
+    source: application-postgres
+    operation: logical_backup
+    cron: "0 2 * * *"
+    timezone: Africa/Lagos

@@ -1,0 +1,24 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: integration-access
+      MINIO_ROOT_PASSWORD: integration-secret
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ['/bin/sh','-c']
+    command: >
+      "mc alias set local http://minio:9000 integration-access integration-secret &&
+       mc mb --ignore-existing local/dbvault-integration"

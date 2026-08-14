@@ -1,0 +1,1 @@
+# PostgreSQL wal-archive-command

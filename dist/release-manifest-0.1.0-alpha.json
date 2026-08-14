@@ -1,0 +1,9 @@
+{
+  "name": "DBVault",
+  "version": "0.1.0-alpha",
+  "channel": "alpha",
+  "artifact": "dbvault-0.1.0-alpha-linux-amd64-restricted.tar.gz",
+  "checksum_file": "dbvault-0.1.0-alpha-linux-amd64-restricted.tar.gz.sha256",
+  "ui_embedded": true,
+  "production_ready": false
+}

@@ -1,0 +1,31 @@
+services:
+  postgres-17:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: dbvault
+      POSTGRES_USER: dbvault
+      POSTGRES_DB: application
+    ports: ["55432:5432"]
+  mysql-8:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: dbvault
+      MYSQL_DATABASE: application
+      MYSQL_USER: dbvault
+      MYSQL_PASSWORD: dbvault
+    ports: ["53306:3306"]
+  mariadb-11:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: dbvault
+      MARIADB_DATABASE: application
+      MARIADB_USER: dbvault
+      MARIADB_PASSWORD: dbvault
+    ports: ["53307:3306"]
+  minio-primary:
+    image: minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: integration-access
+      MINIO_ROOT_PASSWORD: integration-secret
+    ports: ["59000:9000", "59001:9001"]

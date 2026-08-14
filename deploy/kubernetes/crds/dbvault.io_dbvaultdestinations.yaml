@@ -1,0 +1,41 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: dbvaultdestinations.dbvault.io
+spec:
+  group: dbvault.io
+  scope: Namespaced
+  names:
+    plural: dbvaultdestinations
+    singular: dbvaultdestination
+    kind: DBVaultDestination
+    shortNames: [dbvdest]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [driver]
+              properties:
+                driver: {type: string, enum: [s3, filesystem]}
+                profile: {type: string}
+                endpoint: {type: string}
+                region: {type: string}
+                bucket: {type: string}
+                prefix: {type: string}
+                credentialsSecretRef:
+                  type: object
+                  properties:
+                    name: {type: string}
+                  required: [name]
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
