@@ -24,7 +24,7 @@ func (h ArchiveHelper) Push(ctx context.Context, filePath, name string) (domain.
 	if !ValidName(name) { return domain.TransactionLog{}, domain.NewError(domain.ErrWALSegmentInvalid, "invalid WAL filename", nil) }
 	clean := filepath.Clean(filePath); f, err := os.Open(clean); if err != nil { return domain.TransactionLog{}, err }; defer f.Close()
 	hash := sha256.New(); n, err := io.Copy(hash, f); if err != nil { return domain.TransactionLog{}, err }
-	_, _ = f.Seek(0,0); key := "logs/postgres/"+string(h.SourceID)+"/"+name
+	_, _ = f.Seek(0,0); key := string(h.SourceID)+"/wal/"+name
 	if h.Store != nil { _, err = h.Store.Put(ctx, ports.PutObjectRequest{Key:key, Body:f, Size:n, ContentType:"application/octet-stream", IfNotExists:true}); if err != nil { return domain.TransactionLog{}, err } }
 	now := time.Now(); if h.Now != nil { now=h.Now() }
 	return domain.TransactionLog{ID:domain.TransactionLogID(name), SourceID:h.SourceID, RepositoryID:h.RepositoryID, Kind:domain.LogPostgresWAL, NativeName:name, LogicalSize:n, StoredSize:n, Checksum:hex.EncodeToString(hash.Sum(nil)), ObjectKey:key, Status:domain.LogVerified, CollectedAt:now, VerifiedAt:&now}, nil

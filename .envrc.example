@@ -1,3 +1,22 @@
-export DBVAULT_REPO=/var/lib/dbvault/repository
+# ==============================================================================
+# DBVault Appliance direnv Configuration (.envrc.example)
+# Copy to .envrc or run `direnv allow`
+# ==============================================================================
+
+# 1. DBVault Internal Appliance State (System Database)
+export DBVAULT_DATA_DIR=/var/lib/dbvault
 export DBVAULT_SCRATCH=/var/lib/dbvault/scratch
 export DBVAULT_KEY_FILE=/run/secrets/dbvault_master_key
+
+# Optional: Dedicated PostgreSQL internal metadata database
+# export DBVAULT_DATABASE_URL="postgresql://dbvault_app:secret@127.0.0.1:5432/dbvault_internal"
+
+# 2. Network & Server Listen
+export DBVAULT_LISTEN=127.0.0.1:8080
+export DBVAULT_PUBLIC_URL=http://127.0.0.1:8080
+
+# 3. Storage Targets & Target Databases (Managed in Web UI)
+# Offsite Cloud Storage (R2/S3/Contabo) and Target Databases (Postgres/MySQL/SQLite)
+# are managed dynamically in the Web Console:
+#   Storage Targets:   http://127.0.0.1:8080/repositories
+#   Target Databases:  http://127.0.0.1:8080/databases

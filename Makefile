@@ -329,3 +329,52 @@ test-phase8i: test-final-ui-cleanup
 	CGO_ENABLED=0 go test -tags=restricted ./...
 	CGO_ENABLED=0 go build -tags=restricted ./cmd/dbvault ./cmd/dbvaultd ./cmd/dbvault-controller ./cmd/dbvault-agent ./cmd/dbvault-operator
 	go vet -tags=restricted ./...
+
+# ------------------------------------------------------------------------------
+# Appliance Runtime, Database Management & Discovery Commands
+# ------------------------------------------------------------------------------
+.PHONY: dev server db-init probe-postgres probe-mysql probe-sqlite
+
+# Build web frontend and Go binaries, then launch the server
+dev: web-build build-prod server
+
+build-prod:
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -o bin/dbvault ./cmd/dbvault
+	CGO_ENABLED=0 go build -o bin/dbvaultd ./cmd/dbvaultd
+
+# Run the DBVault appliance server using environment variables from .env
+server: build-prod
+	@mkdir -p scratch/data
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	DATA_DIR="$${DBVAULT_DATA_DIR:-./scratch/data}"; \
+	if ! mkdir -p "$$DATA_DIR" 2>/dev/null; then \
+		DATA_DIR="./scratch/data"; \
+		mkdir -p "$$DATA_DIR"; \
+	fi; \
+	./bin/dbvault server --listen "$${DBVAULT_LISTEN:-127.0.0.1:8080}" --data-dir "$$DATA_DIR"
+
+# Initialize or verify the PostgreSQL dbvault_internal system database
+db-init:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	echo "Initializing DBVault internal PostgreSQL database..."; \
+	PGPASSWORD="$${PGPASSWORD:-Awodumila}" psql -h 127.0.0.1 -U "$${PGUSER:-postgres}" -c "CREATE DATABASE dbvault_internal;" 2>/dev/null || true; \
+	PGPASSWORD="$${PGPASSWORD:-Awodumila}" psql -h 127.0.0.1 -U "$${PGUSER:-postgres}" -d dbvault_internal -c "\
+	CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()); \
+	CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, driver TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, repository_id TEXT NOT NULL, config_json TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), last_snapshot_id TEXT); \
+	CREATE TABLE IF NOT EXISTS snapshots (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, repository_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_mode TEXT NOT NULL, database_size BIGINT NOT NULL, page_size INT NOT NULL, page_count BIGINT NOT NULL, root_digest TEXT NOT NULL, schema_digest TEXT NOT NULL, chunk_count INT NOT NULL, unique_chunk_count INT NOT NULL, compressed_bytes BIGINT NOT NULL, unique_uploaded_bytes BIGINT NOT NULL, manifest_object_key TEXT NOT NULL, completion_object_key TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), committed_at TIMESTAMP WITH TIME ZONE, verified_at TIMESTAMP WITH TIME ZONE, restore_tested_at TIMESTAMP WITH TIME ZONE, tombstoned_at TIMESTAMP WITH TIME ZONE, delete_after TIMESTAMP WITH TIME ZONE);" && \
+	echo "dbvault_internal database is ready."
+
+# Probe target PostgreSQL engine and list databases with live storage size
+probe-postgres: build-restricted
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	./bin/dbvault probe --engine postgres --host 127.0.0.1 --port 5432 --user "$${PGUSER:-postgres}"
+
+# Probe target MySQL/MariaDB engine and list databases with storage footprint
+probe-mysql: build-restricted
+	./bin/dbvault probe --engine mysql --host 127.0.0.1 --port 3306 --user root
+
+# Probe target SQLite files or folder path
+probe-sqlite: build-restricted
+	./bin/dbvault probe --engine sqlite --path ./scratch
+

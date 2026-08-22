@@ -14,7 +14,8 @@ export const Store = (() => {
     jobFilter: 'all',
     connection: { status: 'disconnected', lastEventId: null, error: null },
     jobs: { byId: {}, orderedIds: [], activeIds: [], failedIds: [], completedIds: [], loading: false, error: null },
-    alerts: { items: [], badge: 0 }
+    alerts: { items: [], badge: 0 },
+    confirmModal: null
   };
   const listeners = new Set();
   function set(patch) {
@@ -35,13 +36,34 @@ export const Store = (() => {
     setTimeout(() => set({ toast: null }), 4200);
   }
   function refresh() { set({ refreshToken: state.refreshToken + 1 }); }
+  function confirm(options) {
+    return new Promise((resolve) => {
+      const modalConfig = typeof options === 'string' ? { message: options } : options;
+      set({
+        confirmModal: {
+          title: modalConfig.title || 'Confirm Action',
+          message: modalConfig.message || 'Are you sure you want to proceed?',
+          confirmLabel: modalConfig.confirmLabel || 'Confirm',
+          cancelLabel: modalConfig.cancelLabel || 'Cancel',
+          confirmTone: modalConfig.confirmTone || 'danger',
+          resolve: (result) => {
+            set({ confirmModal: null });
+            resolve(result);
+            if (result && modalConfig.onConfirm) modalConfig.onConfirm();
+            if (!result && modalConfig.onCancel) modalConfig.onCancel();
+          }
+        }
+      });
+    });
+  }
   window.addEventListener('popstate', () => set({ route: window.location.pathname, mobileNavOpen: false }));
   window.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       set({ commandOpen: !state.commandOpen, mobileNavOpen: false });
     }
-    if (event.key === 'Escape') set({ commandOpen: false, mobileNavOpen: false, workspaceOpen: false });
+    if (event.key === 'Escape') set({ commandOpen: false, mobileNavOpen: false, workspaceOpen: false, confirmModal: null });
   });
-  return { state, set, subscribe, navigate, toast, refresh };
+  return { state, set, subscribe, navigate, toast, refresh, confirm };
 })();
+

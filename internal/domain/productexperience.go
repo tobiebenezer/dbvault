@@ -58,6 +58,17 @@ type RecoveryTimelineGap struct {
 	Reason string    `json:"reason"`
 }
 
+type WALSegmentView struct {
+	SegmentName       string    `json:"segment_name"`
+	StartLSN          string    `json:"start_lsn"`
+	EndLSN            string    `json:"end_lsn"`
+	SizeBytes         int64     `json:"size_bytes"`
+	TransactionsCount int64     `json:"transactions_count"`
+	ChecksumSHA256    string    `json:"checksum_sha256"`
+	ArchivedAt        time.Time `json:"archived_at"`
+	Status            string    `json:"status"` // "verified", "replaying", "archived"
+}
+
 type RecoveryTimelineResponse struct {
 	SourceID    string                  `json:"source_id"`
 	Earliest    *time.Time              `json:"earliest,omitempty"`
@@ -66,6 +77,7 @@ type RecoveryTimelineResponse struct {
 	Windows     []RecoveryWindowView    `json:"windows"`
 	Events      []RecoveryTimelineEvent `json:"events"`
 	Gaps        []RecoveryTimelineGap   `json:"gaps"`
+	Segments    []WALSegmentView        `json:"segments,omitempty"`
 	GeneratedAt time.Time               `json:"generated_at"`
 }
 
@@ -201,7 +213,13 @@ type DestinationResource struct {
 	Name          string    `json:"name"`
 	Provider      string    `json:"provider"`
 	Role          string    `json:"role"`
+	Tier          string    `json:"tier,omitempty"`     // "performance", "capacity"
+	Priority      string    `json:"priority,omitempty"` // "primary", "secondary", "archive"
+	LatencyMs     int       `json:"latency_ms,omitempty"`
 	Region        string    `json:"region"`
+	Endpoint      string    `json:"endpoint,omitempty"`
+	Bucket        string    `json:"bucket,omitempty"`
+	Configured    bool      `json:"configured"`
 	Status        string    `json:"status"`
 	LagSeconds    int64     `json:"lag_seconds"`
 	LastCheckedAt time.Time `json:"last_checked_at"`
@@ -222,6 +240,8 @@ type RestoreApprovalRequest struct {
 	Target      string     `json:"target"`
 	RequestedBy string     `json:"requested_by"`
 	Status      string     `json:"status"`
+	DecidedBy   string     `json:"decided_by,omitempty"`
+	DecidedAt   *time.Time `json:"decided_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   time.Time  `json:"expires_at"`
 }

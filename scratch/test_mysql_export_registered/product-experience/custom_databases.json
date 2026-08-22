@@ -1,0 +1,17 @@
+{
+  "mysql-mysql_ecommerce": {
+    "id": "mysql-mysql_ecommerce",
+    "name": "mysql_ecommerce",
+    "engine": "mysql",
+    "version": "",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T22:36:46.834805717Z",
+    "last_drill_at": "2026-08-16T22:36:46.834805717Z",
+    "destination_ids": [
+      "r2-primary"
+    ],
+    "repository_id": "production"
+  }
+}

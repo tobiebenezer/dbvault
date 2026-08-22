@@ -1,0 +1,34 @@
+{
+  "mysql-75f4e6a4": {
+    "id": "mysql-75f4e6a4",
+    "name": "tenant_plateau_rider",
+    "engine": "mysql",
+    "version": "16",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T23:14:26.383142448Z",
+    "last_drill_at": "2026-08-16T22:07:02.456466631Z",
+    "destination_ids": [
+      "r2-primary",
+      "contabo-replica"
+    ],
+    "repository_id": "production"
+  },
+  "pg-cc3b33a5": {
+    "id": "pg-cc3b33a5",
+    "name": "cribx_test",
+    "engine": "postgres",
+    "version": "16",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T23:13:43.849272989Z",
+    "last_drill_at": "2026-08-16T18:07:08.937825716Z",
+    "destination_ids": [
+      "r2-primary",
+      "contabo-replica"
+    ],
+    "repository_id": "production"
+  }
+}

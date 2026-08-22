@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	mf "github.com/dbvault/dbvault/internal/application/manifest"
 	"github.com/dbvault/dbvault/internal/domain"
@@ -36,7 +37,11 @@ func (s Service) VerifyRemote(ctx context.Context, id domain.SnapshotID) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	sigR, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: fmt.Sprintf("snapshots/%s/%s/manifest.sig", snap.SourceID, snap.ID)})
+	sigKey := strings.TrimSuffix(snap.ManifestObjectKey, ".json") + ".sig"
+	if sigKey == "" || sigKey == ".sig" {
+		sigKey = fmt.Sprintf("%s/snapshots/%s/manifest.sig", snap.SourceID, snap.ID)
+	}
+	sigR, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: sigKey})
 	if err != nil {
 		return Result{}, err
 	}

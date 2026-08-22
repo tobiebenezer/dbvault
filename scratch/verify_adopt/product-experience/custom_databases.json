@@ -1,0 +1,34 @@
+{
+  "pg-cribx": {
+    "id": "pg-cribx",
+    "name": "cribx",
+    "engine": "postgres",
+    "version": "16",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T18:12:47.529395523Z",
+    "last_drill_at": "2026-08-16T18:12:47.529395523Z",
+    "destination_ids": [
+      "r2-primary",
+      "contabo-replica"
+    ],
+    "repository_id": "production"
+  },
+  "pg-dbvault": {
+    "id": "pg-dbvault",
+    "name": "dbvault_internal",
+    "engine": "postgres",
+    "version": "16",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T18:12:47.529395523Z",
+    "last_drill_at": "2026-08-16T18:12:47.529395523Z",
+    "destination_ids": [
+      "r2-primary",
+      "contabo-replica"
+    ],
+    "repository_id": "production"
+  }
+}

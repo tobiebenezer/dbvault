@@ -1,3 +1,6 @@
+import { Store } from '../state.js';
+import { AlertsAPI } from '../api/alerts.js';
+
 export const AlertsStore = (() => {
   async function refresh() {
     try {

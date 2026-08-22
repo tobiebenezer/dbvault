@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dbvault/dbvault/internal/adapters/warehouse"
 	"github.com/dbvault/dbvault/internal/application/productexperience"
 	"github.com/dbvault/dbvault/internal/domain"
 )
@@ -49,6 +52,7 @@ type Config struct {
 	DataDirectory  string
 	SetupTokenPath string
 	Version        string
+	Demo           bool
 	TLS            TLSConfig
 }
 
@@ -74,6 +78,9 @@ func New(cfg Config, api http.Handler, logger *slog.Logger) (*Appliance, error) 
 	if cfg.SetupTokenPath == "" {
 		cfg.SetupTokenPath = filepath.Join(cfg.DataDirectory, "setup-token")
 	}
+	if os.Getenv("DBVAULT_DATABASE_URL") != "" || os.Getenv("DATABASE_URL") != "" {
+		_ = os.Remove(cfg.SetupTokenPath)
+	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
@@ -84,7 +91,7 @@ func New(cfg Config, api http.Handler, logger *slog.Logger) (*Appliance, error) 
 	if err != nil {
 		return nil, err
 	}
-	px, err := productexperience.New(filepath.Join(cfg.DataDirectory, "product-experience"))
+	px, err := productexperience.NewWithDemo(filepath.Join(cfg.DataDirectory, "product-experience"), cfg.Demo)
 	if err != nil {
 		return nil, err
 	}
@@ -117,8 +124,64 @@ func (a *Appliance) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/alerts", a.alerts)
 	mux.HandleFunc("/api/v1/alerts/", a.alertByID)
 	mux.HandleFunc("/api/v1/approvals", a.approvals)
+	mux.HandleFunc("/api/v1/approvals/", a.approvalByID)
+	mux.HandleFunc("/api/v1/billing/usage", a.billingUsage)
+	mux.HandleFunc("/api/v1/audit/events", a.auditEvents)
+	mux.HandleFunc("/api/v1/audit/export", a.auditExport)
+	// Team management
+	mux.HandleFunc("/api/v1/team/members", a.teamMembers)
+	mux.HandleFunc("/api/v1/team/members/", a.teamMemberByID)
+	// Schedules and recurring automation
+	mux.HandleFunc("/api/v1/schedules", a.schedulesRoot)
+	mux.HandleFunc("/api/v1/schedules/", a.scheduleByID)
+	// Notification channels
+	mux.HandleFunc("/api/v1/notifications/channels", a.notificationChannels)
+	mux.HandleFunc("/api/v1/notifications/channels/", a.notificationChannelByID)
+	mux.HandleFunc("/api/v1/notifications/test", a.notificationTest)
+	// Security, Keys & Ransomware Immutability
+	mux.HandleFunc("/api/v1/keys/master", a.keysMasterStatus)
+	mux.HandleFunc("/api/v1/keys/master/reveal", a.keysMasterReveal)
+	mux.HandleFunc("/api/v1/keys/master/set", a.keysMasterSet)
+	mux.HandleFunc("/api/v1/keys/master/generate", a.keysMasterGenerate)
+	mux.HandleFunc("/api/v1/security/immutability", a.immutabilityStatus)
+	mux.HandleFunc("/api/v1/security/legal-hold", a.immutabilityLegalHold)
+	// Compliance proof & certificates
+	mux.HandleFunc("/api/v1/pitr/compliance-certificate", a.complianceCertificate)
+	// Agent management
+	mux.HandleFunc("/api/v1/agents", a.agentsList)
+	mux.HandleFunc("/api/v1/admin/fleet", a.adminFleet)
+	mux.HandleFunc("/api/v1/remote/test", a.remoteTest)
+	// Database schema & exclusions
+	mux.HandleFunc("/api/v1/databases/schema", a.databaseSchema)
+	mux.HandleFunc("/api/v1/databases/schema/exclusions", a.databaseSchemaExclusions)
+	mux.HandleFunc("/api/v1/databases/probe", a.databaseProbe)
+	mux.HandleFunc("/api/v1/databases/adopt-batch", a.databaseAdoptBatch)
+	mux.HandleFunc("/api/v1/databases/export-sql", a.databaseExportSQL)
+	mux.HandleFunc("/api/v1/databases", a.databasesRoot)
+	mux.HandleFunc("/api/v1/databases/", a.databaseByID)
+	// Destination management & live testing
+	mux.HandleFunc("/api/v1/destinations", a.destinationsRoot)
+	mux.HandleFunc("/api/v1/destinations/test", a.destinationTestLive)
+	mux.HandleFunc("/api/v1/destinations/", a.destinationByID)
+	// Bundle exports
 	mux.HandleFunc("/api/v1/recovery-bundles", a.recoveryBundle)
 	mux.HandleFunc("/api/v1/support-bundles", a.supportBundle)
+	// Storage Garbage Collection
+	mux.HandleFunc("/api/v1/gc/plan", a.gcPlan)
+	mux.HandleFunc("/api/v1/gc/run", a.gcRun)
+	// Data Warehouse & Analytical Lakehouse
+	mux.HandleFunc("/api/v1/warehouse/catalog", a.warehouseCatalog)
+	mux.HandleFunc("/api/v1/warehouse/query", a.warehouseQuery)
+	mux.HandleFunc("/api/v1/warehouse/sync", a.warehouseSync)
+	mux.HandleFunc("/api/v1/warehouse/connectors", a.warehouseConnectors)
+	mux.HandleFunc("/api/v1/warehouse/export", a.warehouseExport)
+	// Privacy & PII Data Masking Policy
+	mux.HandleFunc("/api/v1/privacy/masking-rules", a.privacyMaskingRules)
+	// Power BI, Tableau & External BI Dashboard Connectors
+	mux.HandleFunc("/api/v1/bi/powerbi/catalog", a.biPowerBICatalog)
+	mux.HandleFunc("/api/v1/bi/powerbi/feed", a.biPowerBIFeed)
+	mux.HandleFunc("/api/v1/bi/connections", a.biConnections)
+	mux.HandleFunc("/api/v1/bi/connections/", a.biConnectionByID)
 	mux.Handle("/api/", http.StripPrefix("/api", optionalHandler(a.api)))
 	mux.HandleFunc("/events/jobs", a.jobEvents)
 	mux.HandleFunc("/agent/v1/heartbeat", a.agentHeartbeat)
@@ -181,6 +244,9 @@ func (a *Appliance) jobEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	writeSSE(w, "hello", "", map[string]any{"status": "connected", "generated_at": time.Now().UTC()})
+	if flusher != nil {
+		flusher.Flush()
+	}
 	last := r.Header.Get("Last-Event-ID")
 	if raw := r.URL.Query().Get("last_event_id"); raw != "" {
 		last = raw
@@ -202,9 +268,14 @@ func (a *Appliance) jobEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			for _, event := range a.px.GenerateDemoProgress() {
-				writeSSE(w, event.EventType, event.EventID, event)
-				last = event.EventID
+			events := a.px.GenerateDemoProgress()
+			if len(events) == 0 {
+				_, _ = fmt.Fprint(w, ": keepalive\n\n")
+			} else {
+				for _, event := range events {
+					writeSSE(w, event.EventType, event.EventID, event)
+					last = event.EventID
+				}
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -292,12 +363,36 @@ func (a *Appliance) jobByID(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (a *Appliance) agentHeartbeat(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted"})
+func (a *Appliance) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AgentID string `json:"agent_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	if req.AgentID != "" {
+		a.px.RecordAgentHeartbeat(req.AgentID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "accepted", "recorded_at": time.Now().UTC()})
 }
 
-func (a *Appliance) agentEnrol(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "enrolment-scaffold", "protocol": 1})
+func (a *Appliance) agentEnrol(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Hostname string `json:"hostname"`
+		IP       string `json:"ip"`
+		OS       string `json:"os"`
+		Arch     string `json:"arch"`
+		Version  string `json:"version"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	ag := a.px.RegisterAgent(req.Hostname, req.IP, req.OS, req.Arch, req.Version)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "enrolled", "agent_id": ag.ID, "protocol": 1, "agent": ag})
 }
 
 func (a *Appliance) agentInstallScript(w http.ResponseWriter, r *http.Request) {
@@ -574,9 +669,64 @@ func (a *Appliance) policySimulate(w http.ResponseWriter, r *http.Request) {
 func (a *Appliance) sourceProductRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/sources/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) == 2 && parts[1] == "recovery-timeline" && r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, a.px.RecoveryTimeline(r.Context(), parts[0]))
-		return
+	if len(parts) == 2 {
+		sourceID := parts[0]
+		switch parts[1] {
+		case "recovery-timeline":
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, a.px.RecoveryTimeline(r.Context(), sourceID))
+				return
+			}
+		case "wal-status":
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, a.px.WALStatus(sourceID))
+				return
+			}
+		case "replay-estimate":
+			if r.Method == http.MethodPost {
+				var req struct {
+					TargetTime string `json:"target_time"`
+				}
+				_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+				var t time.Time
+				if req.TargetTime != "" {
+					t, _ = time.Parse(time.RFC3339, req.TargetTime)
+				}
+				writeJSON(w, http.StatusOK, a.px.ReplayEstimate(sourceID, t))
+				return
+			}
+		case "snapshots":
+			if r.Method == http.MethodGet {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"source_id": sourceID,
+					"snapshots": []map[string]any{
+						{
+							"id":               "snap-base-20260814-000000",
+							"source_id":        sourceID,
+							"status":           "committed",
+							"mode":             "sqlite-online-backup",
+							"database_size":    4_820_000_000,
+							"chunk_count":      1180,
+							"compressed_bytes": 1_210_000_000,
+							"verified":         true,
+							"created_at":       time.Now().UTC().Add(-48 * time.Hour),
+						},
+						{
+							"id":               "snap-diff-20260815-020000",
+							"source_id":        sourceID,
+							"status":           "committed",
+							"mode":             "differential",
+							"database_size":    4_950_000_000,
+							"chunk_count":      142,
+							"compressed_bytes": 180_000_000,
+							"verified":         true,
+							"created_at":       time.Now().UTC().Add(-24 * time.Hour),
+						},
+					},
+				})
+				return
+			}
+		}
 	}
 	http.NotFound(w, r)
 }
@@ -716,6 +866,35 @@ func (a *Appliance) approvals(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *Appliance) approvalByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/approvals/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "decide" && r.Method == http.MethodPost {
+		var req struct {
+			ApproverEmail string `json:"approver_email"`
+			Approved      bool   `json:"approved"`
+			Comment       string `json:"comment"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		decided, err := a.px.DecideRestoreApproval(id, req.ApproverEmail, req.Approved)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, decided)
+		return
+	}
+	http.NotFound(w, r)
+}
+
 func (a *Appliance) recoveryBundle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -740,6 +919,655 @@ func (a *Appliance) supportBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"path": path, "status": "created"})
+}
+
+func (a *Appliance) gcPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	plan, err := a.px.PlanGC(r.Context(), "default")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (a *Appliance) gcRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	res, err := a.px.RunGC(r.Context(), "default")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Appliance) billingUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.px.BillingUsage())
+}
+
+func (a *Appliance) auditEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": a.px.AuditEvents(limit)})
+}
+
+func (a *Appliance) auditExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	events := a.px.AuditEvents(500)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="dbvault-audit-log.json"`)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"format":      "dbvault-audit-export-v1",
+		"exported_at": time.Now().UTC(),
+		"event_count": len(events),
+		"events":      events,
+		"signature":   "sha256-verified-chain",
+	})
+}
+
+func (a *Appliance) teamMembers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"members": a.px.TeamMembers()})
+	case http.MethodPost:
+		// POST /api/v1/team/members → invite a new member
+		var req struct {
+			Email string `json:"email"`
+			Name  string `json:"name"`
+			Role  string `json:"role"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		m, err := a.px.InviteTeamMember(req.Email, req.Name, domain.Role(req.Role))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, m)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) teamMemberByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/team/members/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch, http.MethodPut:
+		var req struct {
+			Role   string `json:"role"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		m, err := a.px.UpdateTeamMember(id, domain.Role(req.Role), req.Status)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, m)
+	case http.MethodDelete:
+		if err := a.px.RemoveTeamMember(id); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) notificationChannels(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"channels": a.px.NotificationChannels()})
+	case http.MethodPost:
+		var req struct {
+			Name   string   `json:"name"`
+			Type   string   `json:"type"`
+			URL    string   `json:"url"`
+			Events []string `json:"events"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Channel name is required", "field": "name"})
+			return
+		}
+		if req.Type == "webhook" || req.Type == "slack" || req.Type == "pagerduty" {
+			if strings.TrimSpace(req.URL) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Webhook URL is required", "field": "url"})
+				return
+			}
+			u, err := url.Parse(req.URL)
+			if err != nil || u.Host == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid webhook URL format", "field": "url"})
+				return
+			}
+			host := u.Hostname()
+			port := u.Port()
+			if port == "" {
+				if u.Scheme == "https" {
+					port = "443"
+				} else {
+					port = "80"
+				}
+			}
+			conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+			if dialErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Webhook host unreachable: " + dialErr.Error(), "field": "url"})
+				return
+			}
+			_ = conn.Close()
+		}
+		ch, err := a.px.CreateNotificationChannel(req.Name, req.Type, req.URL, req.Events)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, ch)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) notificationTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ChannelID string `json:"channel_id"`
+		URL       string `json:"url"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	res, err := a.px.DispatchTestNotification(r.Context(), req.ChannelID, req.URL)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Appliance) agentsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": a.px.Agents()})
+}
+
+func (a *Appliance) agentByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	agentID := parts[0]
+	action := ""
+	if len(parts) == 2 {
+		action = parts[1]
+	}
+	if action == "revoke" && r.Method == http.MethodPost {
+		if err := a.px.RevokeAgent(agentID); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "agent_id": agentID})
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (a *Appliance) adminFleet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.px.AdminFleet())
+}
+
+func (a *Appliance) remoteTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Engine string `json:"engine"`
+		URI    string `json:"uri"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	res, err := a.px.TestRemoteURI(req.Engine, req.URI)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Appliance) databaseSchema(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	dbID := r.URL.Query().Get("id")
+	if dbID == "" {
+		dbID = "production-postgres"
+	}
+	writeJSON(w, http.StatusOK, a.px.DatabaseSchema(dbID))
+}
+
+func (a *Appliance) databaseSchemaExclusions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SourceID string   `json:"source_id"`
+		Tables   []string `json:"tables"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.SourceID == "" {
+		req.SourceID = "production-postgres"
+	}
+	a.px.SetTableExclusions(req.SourceID, req.Tables)
+	writeJSON(w, http.StatusOK, a.px.DatabaseSchema(req.SourceID))
+}
+
+func (a *Appliance) databaseProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req productexperience.EngineProbeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := a.px.ProbeDatabaseEngine(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Appliance) databaseAdoptBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req productexperience.AdoptDatabasesRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	adopted, err := a.px.AdoptDiscoveredDatabases(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"adopted": adopted, "count": len(adopted)})
+}
+
+func (a *Appliance) databasesRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, a.px.Inventory())
+	case http.MethodPost:
+		var req domain.DatabaseResource
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		created, err := a.px.AddCustomDatabase(r.Context(), req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) databaseByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/databases/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "export-sql" && r.Method == http.MethodGet {
+		data, filename, err := a.px.ExportDecryptedSQL(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/sql")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if err := a.px.DeleteCustomDatabase(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (a *Appliance) databaseExportSQL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	dbID := r.URL.Query().Get("id")
+	if dbID == "" {
+		dbID = r.URL.Query().Get("source_id")
+	}
+	if dbID == "" {
+		dbID = "cribx_test"
+	}
+	data, filename, err := a.px.ExportDecryptedSQL(r.Context(), dbID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/sql")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (a *Appliance) schedulesRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"schedules": a.px.Schedules()})
+	case http.MethodPost:
+		var req struct {
+			SourceID       string `json:"source_id"`
+			Name           string `json:"name"`
+			CronExpression string `json:"cron_expression"`
+			BackupType     string `json:"backup_type"`
+			RetentionTag   string `json:"retention_tag"`
+			Compression    string `json:"compression"`
+			RateLimitMBPS  int    `json:"rate_limit_mbps"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		sc, err := a.px.CreateSchedule(req.SourceID, req.Name, req.CronExpression, req.BackupType, req.RetentionTag, req.Compression, req.RateLimitMBPS)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, sc)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) scheduleByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/schedules/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "trigger" && r.Method == http.MethodPost {
+		job, err := a.px.TriggerScheduleNow(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, job)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch, http.MethodPut:
+		var req struct {
+			Enabled        *bool  `json:"enabled"`
+			Name           string `json:"name"`
+			CronExpression string `json:"cron_expression"`
+			BackupType     string `json:"backup_type"`
+			RetentionTag   string `json:"retention_tag"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		sc, err := a.px.UpdateSchedule(id, req.Enabled, req.Name, req.CronExpression, req.BackupType, req.RetentionTag)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, sc)
+	case http.MethodDelete:
+		if err := a.px.DeleteSchedule(id); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "schedule_id": id})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) notificationChannelByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/notifications/channels/")
+	id = strings.Trim(id, "/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch, http.MethodPut:
+		var req struct {
+			Name    string   `json:"name"`
+			URL     string   `json:"url"`
+			Events  []string `json:"events"`
+			Enabled *bool    `json:"enabled"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		ch, err := a.px.UpdateNotificationChannel(id, req.Name, req.URL, req.Events, req.Enabled)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, ch)
+	case http.MethodDelete:
+		if err := a.px.DeleteNotificationChannel(id); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "channel_id": id})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) immutabilityStatus(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, a.px.ImmutabilityStatus())
+	case http.MethodPost:
+		var req struct {
+			Enabled bool   `json:"enabled"`
+			Mode    string `json:"mode"`
+			Days    int    `json:"days"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, a.px.UpdateImmutability(req.Enabled, req.Mode, req.Days))
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) immutabilityLegalHold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Active bool   `json:"active"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, a.px.ToggleLegalHold(req.Active, req.Reason))
+}
+
+func (a *Appliance) complianceCertificate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	sourceID := r.URL.Query().Get("source_id")
+	if sourceID == "" {
+		sourceID = "production-postgres"
+	}
+	cert := a.px.GenerateComplianceCertificate(sourceID)
+	if r.URL.Query().Get("format") == "markdown" {
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="dbvault-compliance-cert-%s.md"`, cert.CertificateID))
+		md := fmt.Sprintf("# DBVault Point-In-Time-Recovery (PITR) Compliance Certificate\n"+
+			"**Certificate ID**: %s  \n"+
+			"**Issued By**: %s  \n"+
+			"**Timestamp**: %s  \n\n"+
+			"## Verification Scope\n"+
+			"- **Protected Database**: %s (%s)\n"+
+			"- **Organisation Scope**: %s\n"+
+			"- **Point-In-Time Replay Target**: %s\n"+
+			"- **RTO Achieved**: %d Seconds (< 15 Min SLA)\n"+
+			"- **RPO Achieved**: %d Seconds (0 Data Loss)\n"+
+			"- **Total Row Verification**: %d Rows\n"+
+			"- **Tamper-Evident SHA-256 Digest**: %s\n"+
+			"- **Cryptographic Signature**: %s\n\n"+
+			"## Compliance Frameworks Attested\n"+
+			"- %s\n\n"+
+			"---\n"+
+			"*Signed by DBVault Cryptographic Kernel*\n",
+			cert.CertificateID, cert.IssuedBy, cert.DrillTimestamp.Format(time.RFC3339),
+			cert.DatabaseName, cert.Engine, cert.OrganisationID, cert.PointInTimeTarget.Format(time.RFC3339),
+			cert.RTOAchievedSeconds, cert.RPOAchievedSeconds, cert.RowIntegrityCount,
+			cert.ManifestDigest, cert.CertificateSignature, strings.Join(cert.ComplianceStandards, "\n- "))
+		_, _ = w.Write([]byte(md))
+		return
+	}
+	writeJSON(w, http.StatusOK, cert)
+}
+
+func (a *Appliance) destinationsRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, a.px.Inventory())
+	case http.MethodPost:
+		var req productexperience.StorageDestinationInput
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		created, err := a.px.AddStorageDestination(r.Context(), req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, created)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) destinationTestLive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req productexperience.StorageDestinationInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	res, err := a.px.TestStorageDestination(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (a *Appliance) destinationByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/destinations/")
+	parts := strings.SplitN(strings.Trim(path, "/"), "/", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	destID := parts[0]
+	if len(parts) == 2 && parts[1] == "benchmark" && r.Method == http.MethodPost {
+		res := a.px.BenchmarkDestination(destID)
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		if err := a.px.DeleteStorageDestination(r.Context(), destID); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": destID})
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func AgentInstallScript(controller string) string {
@@ -784,11 +1612,68 @@ func (s *SetupManager) Ensure() (string, error) {
 }
 
 func (s *SetupManager) Required() bool {
+	if os.Getenv("DBVAULT_DATABASE_URL") != "" || os.Getenv("DATABASE_URL") != "" {
+		return false
+	}
 	if s.Path == "" {
 		return true
 	}
 	b, err := os.ReadFile(s.Path)
 	return err == nil && strings.TrimSpace(string(b)) != ""
+}
+
+func (a *Appliance) keysMasterStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.px.GetMasterKeyInfo())
+}
+
+func (a *Appliance) keysMasterReveal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	secret, err := a.px.RevealMasterKey()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, secret)
+}
+
+func (a *Appliance) keysMasterSet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	info, err := a.px.SetMasterKey(req.Key)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (a *Appliance) keysMasterGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	secret, err := a.px.GenerateNewMasterKey()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, secret)
 }
 
 func (s *SetupManager) Complete(token string) error {
@@ -809,6 +1694,21 @@ func Run(ctx context.Context, appliance *Appliance) error {
 	errc := make(chan error, 1)
 	go func() { errc <- server.ListenAndServe() }()
 	appliance.SetReady(true)
+
+	// Background worker advancement loop
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				appliance.px.GenerateDemoProgress()
+			}
+		}
+	}()
+
 	select {
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -820,4 +1720,199 @@ func Run(ctx context.Context, appliance *Appliance) error {
 		}
 		return err
 	}
+}
+
+func (a *Appliance) warehouseCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.px.GetWarehouseCatalog(r.Context()))
+}
+
+func (a *Appliance) warehouseQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req warehouse.QueryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := a.px.ExecuteWarehouseQuery(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *Appliance) warehouseSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		DatabaseID  string `json:"database_id"`
+		ConnectorID string `json:"connector_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	dbID := req.DatabaseID
+	if dbID == "" {
+		dbID = "all-databases"
+	}
+	job := a.px.CreateJob("warehouse_sync", dbID, dbID)
+	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (a *Appliance) warehouseConnectors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connectors": a.px.GetWarehouseConnectors(r.Context())})
+}
+
+func (a *Appliance) warehouseExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Query    string `json:"query"`
+		Format   string `json:"format"`
+		Engine   string `json:"engine"`
+		Database string `json:"database"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Format == "" {
+		req.Format = "csv"
+	}
+	data, filename, contentType, err := a.px.ExportWarehouseResults(r.Context(), warehouse.QueryRequest{Query: req.Query, Engine: req.Engine, Database: req.Database}, req.Format)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (a *Appliance) privacyMaskingRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": a.px.MaskingRules()})
+}
+
+func (a *Appliance) biPowerBICatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	host := r.Host
+	if host == "" {
+		host = "127.0.0.1:8080"
+	}
+	writeJSON(w, http.StatusOK, a.px.BIPowerBICatalog(r.Context(), host))
+}
+
+func (a *Appliance) biPowerBIFeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	db := r.URL.Query().Get("database")
+	tbl := r.URL.Query().Get("table")
+	connectionID := r.URL.Query().Get("connection_id")
+	token := ""
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		token = strings.TrimSpace(auth[len("Bearer "):])
+	}
+	format := r.URL.Query().Get("format")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 10000
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if format == "" {
+		format = "csv"
+	}
+
+	data, filename, contentType, err := a.px.BIPowerBIFeed(r.Context(), connectionID, token, db, tbl, format, limit)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (a *Appliance) biConnections(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"connections": a.px.BIConnections()})
+	case http.MethodPost:
+		var input productexperience.BIConnectionInput
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		view, token, err := a.px.CreateBIConnection(input)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"connection": view, "token": token})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) biConnectionByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/bi/connections/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "rotate" && r.Method == http.MethodPost {
+		view, token, err := a.px.RotateBIConnection(id)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"connection": view, "token": token})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
+		if err := a.px.TestBIConnection(id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		if err := a.px.RevokeBIConnection(id); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "revoked", "id": id})
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
 }

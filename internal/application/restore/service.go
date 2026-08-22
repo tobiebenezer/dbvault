@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -142,7 +143,10 @@ func (s *Service) readAndVerifyManifest(ctx context.Context, snap domain.Snapsho
 	if err != nil {
 		return nil, man, err
 	}
-	sigKey := fmt.Sprintf("snapshots/%s/%s/manifest.sig", snap.SourceID, snap.ID)
+	sigKey := strings.TrimSuffix(snap.ManifestObjectKey, ".json") + ".sig"
+	if sigKey == "" || sigKey == ".sig" {
+		sigKey = fmt.Sprintf("%s/snapshots/%s/manifest.sig", snap.SourceID, snap.ID)
+	}
 	sigR, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: sigKey})
 	if err != nil {
 		return nil, man, err

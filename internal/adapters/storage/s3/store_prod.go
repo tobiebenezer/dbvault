@@ -75,11 +75,14 @@ func (s *Store) Put(ctx context.Context, req ports.PutObjectRequest) (ports.Stor
 	}
 	out, err := s.client.PutObject(ctx, in)
 	if err != nil {
-		app := classify(err)
-		if app != nil && app.Code == domain.ErrStorageUnavailable && strings.Contains(strings.ToLower(app.Message), "precondition") {
-			return s.Head(ctx, req.Key)
+		var app *domain.AppError
+		if errors.As(classify(err), &app) {
+			if app.Code == domain.ErrStorageUnavailable && strings.Contains(strings.ToLower(app.Message), "precondition") {
+				return s.Head(ctx, req.Key)
+			}
+			return ports.StoredObject{}, app
 		}
-		return ports.StoredObject{}, app
+		return ports.StoredObject{}, err
 	}
 	etag := ""
 	if out.ETag != nil {

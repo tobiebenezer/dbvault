@@ -228,7 +228,7 @@ func TestJobsCanProgressCancelAndRetry(t *testing.T) {
 }
 
 func TestJobEventsAreIncremental(t *testing.T) {
-	svc, err := New(t.TempDir())
+	svc, err := NewWithDemo(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestSetupStepCanMoveBackAndPersists(t *testing.T) {
 }
 
 func TestDiscoveryAndAlertStatusActions(t *testing.T) {
-	svc, err := New(t.TempDir())
+	svc, err := NewWithDemo(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestDiscoveryAndAlertStatusActions(t *testing.T) {
 }
 
 func TestInventoryProvidesConnectedResources(t *testing.T) {
-	svc, err := New(t.TempDir())
+	svc, err := NewWithDemo(t.TempDir(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,3 +322,4 @@ func TestRestoreApprovalRequestIsRecorded(t *testing.T) {
 		t.Fatalf("approval was not retained: %#v", got)
 	}
 }
+

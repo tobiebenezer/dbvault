@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+
+# Local warehouse artifacts and runtime state
+lakehouse/
+*.db
+*.db-wal
+*.db-shm
+

@@ -95,7 +95,7 @@ func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 	var compressedBytes, uniqueBytes int64
 	for i, ch := range chunks {
 		chunkID := ids[i]
-		key := chunkObjectKey(string(s.Repository.ID), s.Repository.Encryption.KeyID, chunkID)
+		key := chunkObjectKey(string(cmd.Source.ID), string(s.Repository.ID), s.Repository.Encryption.KeyID, chunkID)
 		if _, err := s.Store.Head(ctx, key); err == nil {
 			run.ReusedBytes += ch.PlaintextSize
 		} else if !isObjectNotFound(err) {
@@ -129,9 +129,9 @@ func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 	if err != nil {
 		return s.fail(ctx, run, domain.ErrManifestInvalid, err)
 	}
-	manifestKey := fmt.Sprintf("snapshots/%s/%s/manifest.json", cmd.Source.ID, snapID)
-	sigKey := fmt.Sprintf("snapshots/%s/%s/manifest.sig", cmd.Source.ID, snapID)
-	completeKey := fmt.Sprintf("snapshots/%s/%s/complete.json", cmd.Source.ID, snapID)
+	manifestKey := fmt.Sprintf("%s/snapshots/%s/manifest.json", cmd.Source.ID, snapID)
+	sigKey := fmt.Sprintf("%s/snapshots/%s/manifest.sig", cmd.Source.ID, snapID)
+	completeKey := fmt.Sprintf("%s/snapshots/%s/complete.json", cmd.Source.ID, snapID)
 	if _, err := s.Store.Put(ctx, ports.PutObjectRequest{Key: manifestKey, Body: bytes.NewReader(payload), Size: int64(len(payload)), ContentType: "application/json", IfNotExists: true}); err != nil {
 		return s.fail(ctx, run, domain.ErrStorageUnavailable, err)
 	}
@@ -180,10 +180,13 @@ func isObjectNotFound(err error) bool {
 	return false
 }
 
-func chunkObjectKey(repo, keyVersion, chunkID string) string {
+func chunkObjectKey(sourceID, repo, keyVersion, chunkID string) string {
 	p := chunkID
 	if len(p) < 4 {
 		p = strings.Repeat("0", 4-len(p)) + p
+	}
+	if sourceID != "" {
+		return fmt.Sprintf("%s/chunks/%s/%s/%s/%s.dvchunk", sourceID, keyVersion, p[:2], p[2:4], chunkID)
 	}
 	return fmt.Sprintf("chunks/%s/%s/%s/%s.dvchunk", keyVersion, p[:2], p[2:4], chunkID)
 }

@@ -1,9 +1,11 @@
 package retention
 
 import (
-	"github.com/dbvault/dbvault/internal/domain"
+	"fmt"
 	"sort"
 	"time"
+
+	"github.com/dbvault/dbvault/internal/domain"
 )
 
 type Planner struct {
@@ -20,6 +22,7 @@ func New(policy domain.RetentionPolicy, loc *time.Location) Planner {
 	}
 	return Planner{Policy: policy, Location: loc}
 }
+
 func (p Planner) Plan(snaps []domain.Snapshot) domain.RetentionDecision {
 	eligible := []domain.Snapshot{}
 	for _, s := range snaps {
@@ -47,7 +50,7 @@ func (p Planner) Plan(snaps []domain.Snapshot) domain.RetentionDecision {
 	p.bucket(eligible, p.Policy.Daily, func(t time.Time) string { return t.In(p.Location).Format("2006-01-02") }, domain.RetentionDaily, add)
 	p.bucket(eligible, p.Policy.Weekly, func(t time.Time) string {
 		y, w := t.In(p.Location).ISOWeek()
-		return string(rune(y)) + "-" + string(rune(w))
+		return fmt.Sprintf("%04d-W%02d", y, w)
 	}, domain.RetentionWeekly, add)
 	p.bucket(eligible, p.Policy.Monthly, func(t time.Time) string { return t.In(p.Location).Format("2006-01") }, domain.RetentionMonthly, add)
 	tomb := []domain.SnapshotID{}
@@ -58,6 +61,7 @@ func (p Planner) Plan(snaps []domain.Snapshot) domain.RetentionDecision {
 	}
 	return domain.RetentionDecision{Keep: keep, Tombstone: tomb}
 }
+
 func (p Planner) bucket(snaps []domain.Snapshot, max int, key func(time.Time) string, class domain.RetentionClass, add func(domain.SnapshotID, domain.RetentionClass)) {
 	if max <= 0 {
 		return

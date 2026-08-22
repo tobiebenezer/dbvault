@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +23,6 @@ import (
 	gzipc "github.com/dbvault/dbvault/internal/adapters/compression/gzip"
 	"github.com/dbvault/dbvault/internal/adapters/encryption/aead"
 	"github.com/dbvault/dbvault/internal/adapters/id"
-	keyfile "github.com/dbvault/dbvault/internal/adapters/keys/file"
 	ms "github.com/dbvault/dbvault/internal/adapters/manifest"
 	"github.com/dbvault/dbvault/internal/adapters/scratch"
 	"github.com/dbvault/dbvault/internal/adapters/source/mysql"
@@ -88,12 +90,14 @@ func main() {
 		postgresRecoveryCmd(os.Args[2:])
 	case "mysql":
 		mysqlRecoveryCmd(os.Args[2:])
+	case "probe":
+		probeCmd(os.Args[2:])
 	default:
 		usage()
 	}
 }
 func usage() {
-	fmt.Println("dbvault commands: server, install, upgrade, uninstall, agent install|enrol|status, config validate|print-effective, source test|inspect, destination test|capabilities, repository explain, key generate, engine list|inspect, backup-create, backup-list, restore-plan, restore-run, recovery window|plan|verify-chain|drill, postgres wal|physical-backup|restore-point, mysql binlog, doctor, protection status, bundle support|recovery create")
+	fmt.Println("dbvault commands: server, install, upgrade, uninstall, probe, agent install|enrol|status, config validate|print-effective, source test|inspect, destination test|capabilities, repository explain, key generate, engine list|inspect, backup-create, backup-list, restore-plan, restore-run, recovery window|plan|verify-chain|drill, postgres wal|physical-backup|restore-point, mysql binlog, doctor, protection status, bundle support|recovery create")
 }
 func loadApp(configPath string) (*bootstrap.Application, error) {
 	cfg, err := config.Load(configPath)
@@ -131,23 +135,167 @@ func configCmd(args []string) {
 }
 func keyCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("key commands: generate")
+		fmt.Println("DBVault Master Key Management")
+		fmt.Println("")
+		fmt.Println("Commands:")
+		fmt.Println("  dbvault key status               Show active master encryption key metadata & fingerprint")
+		fmt.Println("  dbvault key generate [--out path] Generate a new 256-bit AEAD AES Master Key & Disaster Recovery Sheet")
+		fmt.Println("  dbvault key set --key <val>      Set or import an existing 256-bit Hex Key or Passphrase")
+		fmt.Println("  dbvault key export               Export the Master Key & printable Disaster Recovery Kit")
 		return
 	}
-	fs := flag.NewFlagSet("key", flag.ExitOnError)
-	dir := fs.String("dir", "./data/keys", "key dir")
-	repo := fs.String("repository", "repo_local", "repository id")
-	keyID := fs.String("key-id", "local-key", "encryption key id")
-	_ = fs.Parse(args[1:])
+
+	keyPath := os.Getenv("DBVAULT_KEY_FILE")
+	if keyPath == "" {
+		keyPath = "./scratch/data/master.key"
+	}
+
 	switch args[0] {
+	case "status", "show":
+		var keyBytes []byte
+		var source string
+		if envKey := os.Getenv("DBVAULT_MASTER_KEY"); strings.TrimSpace(envKey) != "" {
+			source = "Environment Variable (DBVAULT_MASTER_KEY)"
+			if b, err := hex.DecodeString(strings.TrimSpace(envKey)); err == nil && len(b) == 32 {
+				keyBytes = b
+			} else {
+				h := sha256.Sum256([]byte(strings.TrimSpace(envKey)))
+				keyBytes = h[:]
+			}
+		} else if b, err := os.ReadFile(keyPath); err == nil && len(b) > 0 {
+			source = "Key File: " + keyPath
+			trimmed := strings.TrimSpace(string(b))
+			if dec, err := hex.DecodeString(trimmed); err == nil && len(dec) == 32 {
+				keyBytes = dec
+			} else {
+				h := sha256.Sum256([]byte(trimmed))
+				keyBytes = h[:]
+			}
+		}
+
+		if len(keyBytes) == 0 {
+			fmt.Println("Status:      No master key configured (will auto-generate on first backup)")
+			fmt.Println("Default Path:", keyPath)
+			return
+		}
+		h := sha256.Sum256(keyBytes)
+		fp := "sha256:" + hex.EncodeToString(h[:])[:16]
+		fmt.Println("Status:       Active & Ready")
+		fmt.Println("Source:      ", source)
+		fmt.Println("Algorithm:    AEAD AES-256-GCM (256-bit)")
+		fmt.Println("Fingerprint: ", fp)
+		fmt.Println("")
+		fmt.Println("Tip: Run 'dbvault key export' to view the Emergency Disaster Recovery Kit.")
+
 	case "generate":
-		if err := keyfile.New(*dir).Generate(*repo, *keyID); err != nil {
-			fmt.Println("key generate failed:", err)
+		fs := flag.NewFlagSet("key generate", flag.ExitOnError)
+		out := fs.String("out", keyPath, "destination key file path")
+		_ = fs.Parse(args[1:])
+
+		key := make([]byte, 32)
+		_, _ = rand.Read(key)
+		hexStr := hex.EncodeToString(key)
+		_ = os.MkdirAll(filepath.Dir(*out), 0700)
+		if err := os.WriteFile(*out, []byte(hexStr+"\n"), 0600); err != nil {
+			fmt.Printf("Error writing key to %s: %v\n", *out, err)
 			os.Exit(1)
 		}
-		fmt.Println("keys generated in", *dir)
+		h := sha256.Sum256(key)
+		fp := "sha256:" + hex.EncodeToString(h[:])[:16]
+
+		fmt.Println("================================================================================")
+		fmt.Println("DBVAULT EMERGENCY DISASTER RECOVERY KIT")
+		fmt.Println("================================================================================")
+		fmt.Println("CRITICAL: Save this Master Key in your password manager (1Password / Bitwarden).")
+		fmt.Println("Without this key, backups in Cloudflare R2 / S3 cannot be decrypted if the server is lost.")
+		fmt.Println("")
+		fmt.Println("Master Key (HEX):  ", hexStr)
+		fmt.Println("Key Fingerprint:   ", fp)
+		fmt.Println("Saved to:          ", *out)
+		fmt.Println("Cipher:             AEAD AES-256-GCM (256-bit)")
+		fmt.Println("================================================================================")
+
+	case "set":
+		fs := flag.NewFlagSet("key set", flag.ExitOnError)
+		rawKey := fs.String("key", "", "32-byte hex key or passphrase")
+		out := fs.String("out", keyPath, "destination key file path")
+		_ = fs.Parse(args[1:])
+
+		if strings.TrimSpace(*rawKey) == "" {
+			fmt.Println("Error: --key argument is required (e.g. dbvault key set --key <hex-key-or-passphrase>)")
+			os.Exit(1)
+		}
+		trimmed := strings.TrimSpace(*rawKey)
+		var keyBytes []byte
+		if dec, err := hex.DecodeString(trimmed); err == nil && len(dec) == 32 {
+			keyBytes = dec
+		} else {
+			h := sha256.Sum256([]byte(trimmed))
+			keyBytes = h[:]
+		}
+		hexStr := hex.EncodeToString(keyBytes)
+		_ = os.MkdirAll(filepath.Dir(*out), 0700)
+		if err := os.WriteFile(*out, []byte(hexStr+"\n"), 0600); err != nil {
+			fmt.Printf("Error writing key to %s: %v\n", *out, err)
+			os.Exit(1)
+		}
+		h := sha256.Sum256(keyBytes)
+		fp := "sha256:" + hex.EncodeToString(h[:])[:16]
+		fmt.Println("Master Key successfully updated & verified.")
+		fmt.Println("Fingerprint: ", fp)
+		fmt.Println("Saved to:    ", *out)
+
+	case "export":
+		var keyBytes []byte
+		var source string
+		if envKey := os.Getenv("DBVAULT_MASTER_KEY"); strings.TrimSpace(envKey) != "" {
+			source = "env:DBVAULT_MASTER_KEY"
+			if b, err := hex.DecodeString(strings.TrimSpace(envKey)); err == nil && len(b) == 32 {
+				keyBytes = b
+			} else {
+				h := sha256.Sum256([]byte(strings.TrimSpace(envKey)))
+				keyBytes = h[:]
+			}
+		} else if b, err := os.ReadFile(keyPath); err == nil && len(b) > 0 {
+			source = keyPath
+			trimmed := strings.TrimSpace(string(b))
+			if dec, err := hex.DecodeString(trimmed); err == nil && len(dec) == 32 {
+				keyBytes = dec
+			} else {
+				h := sha256.Sum256([]byte(trimmed))
+				keyBytes = h[:]
+			}
+		}
+		if len(keyBytes) == 0 {
+			fmt.Println("No master key found. Run 'dbvault key generate' to create one.")
+			os.Exit(1)
+		}
+		hexStr := hex.EncodeToString(keyBytes)
+		h := sha256.Sum256(keyBytes)
+		fp := "sha256:" + hex.EncodeToString(h[:])[:16]
+
+		fmt.Println("================================================================================")
+		fmt.Println("DBVAULT EMERGENCY DISASTER RECOVERY KIT")
+		fmt.Println("================================================================================")
+		fmt.Println("Master Key (HEX):  ", hexStr)
+		fmt.Println("Key Fingerprint:   ", fp)
+		fmt.Println("Source Path:       ", source)
+		fmt.Println("Encryption Cipher:  AEAD AES-256-GCM (256-bit)")
+		fmt.Println("Exported At:       ", time.Now().UTC().Format(time.RFC3339))
+		fmt.Println("")
+		fmt.Println("HOW TO RESTORE ON A NEW SERVER FROM ZERO:")
+		fmt.Println("1. Download DBVault on any fresh machine:")
+		fmt.Println("   curl -fsSL https://get.dbvault.io | sh")
+		fmt.Println("")
+		fmt.Println("2. Export your Master Key:")
+		fmt.Printf("   export DBVAULT_MASTER_KEY=\"%s\"\n", hexStr)
+		fmt.Println("")
+		fmt.Println("3. Restore your database directly from Cloudflare R2 / S3:")
+		fmt.Println("   dbvault restore --snapshot latest --target postgresql://postgres:pass@localhost:5432/my_database")
+		fmt.Println("================================================================================")
+
 	default:
-		fmt.Println("unknown key command")
+		fmt.Println("unknown key command. Try: status, generate, set, export")
 	}
 }
 func backupCreate(args []string) {
@@ -649,6 +797,30 @@ func serverCmd(args []string) {
 	token := fs.String("token", os.Getenv("DBVAULT_CONTROLLER_TOKEN"), "API bearer token")
 	demo := fs.Bool("demo", false, "start with safe demo data and no external credentials")
 	_ = fs.Parse(args)
+
+	// 1. Resolve DBVault Internal App Database from environment
+	if *dataDir == "/var/lib/dbvault" {
+		if envDir := os.Getenv("DBVAULT_DATA_DIR"); envDir != "" {
+			*dataDir = envDir
+		} else if envDir := os.Getenv("DATA_DIR"); envDir != "" {
+			*dataDir = envDir
+		}
+	}
+	appDbURL := os.Getenv("DBVAULT_DATABASE_URL")
+	if appDbURL == "" {
+		appDbURL = os.Getenv("DATABASE_URL")
+	}
+	if appDbURL != "" {
+		if u, err := url.Parse(appDbURL); err == nil && u.User != nil {
+			if pass, ok := u.User.Password(); ok && os.Getenv("PGPASSWORD") == "" {
+				_ = os.Setenv("PGPASSWORD", pass)
+			}
+			if user := u.User.Username(); user != "" && os.Getenv("PGUSER") == "" {
+				_ = os.Setenv("PGUSER", user)
+			}
+		}
+	}
+
 	if *cfgPath != "" {
 		cfg, err := config.Load(*cfgPath)
 		if err != nil {
@@ -664,16 +836,28 @@ func serverCmd(args []string) {
 		}
 	}
 	api := controllerapi.New(controlplane.NewStore(), *token).Handler()
-	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev"}, api, slog.Default())
+	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev", Demo: *demo}, api, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if token, err := appliance.EnsureSetupToken(); err == nil && token != "" {
-		fmt.Println("setup token:", token)
+	if appDbURL == "" {
+		if token, err := appliance.EnsureSetupToken(); err == nil && token != "" {
+			fmt.Println("setup token:", token)
+		}
+	} else {
+		_ = os.Remove(filepath.Join(*dataDir, "setup-token"))
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if appDbURL != "" {
+		fmt.Println("DBVault App System Database (env):", appDbURL)
+	} else {
+		fmt.Println("DBVault App System Database (sqlite):", filepath.Join(*dataDir, "dbvault.db"))
+	}
+	fmt.Println("Target Backup Databases: Managed dynamically via Web UI & Discovery Probe")
+
 	if *demo {
 		fmt.Println("demo mode enabled: sample protection, alert, timeline and sandbox data are served without credentials")
 	}
@@ -819,3 +1003,85 @@ func bundleCmd(args []string) {
 	}
 	fmt.Println(path)
 }
+
+func probeCmd(args []string) {
+	fs := flag.NewFlagSet("probe", flag.ExitOnError)
+	engine := fs.String("engine", "postgres", "database engine (postgres, mysql, sqlite)")
+	host := fs.String("host", "127.0.0.1", "database host")
+	port := fs.Int("port", 0, "database port (defaults: 5432 for postgres, 3306 for mysql)")
+	username := fs.String("user", "", "database username")
+	password := fs.String("password", "", "database password")
+	path := fs.String("path", "", "sqlite database file or directory path")
+	uri := fs.String("uri", "", "database connection URI (e.g. postgres://user:pass@host:5432/dbname)")
+	jsonOut := fs.Bool("json", false, "output result as JSON")
+	_ = fs.Parse(args)
+
+	if *uri != "" {
+		if u, err := url.Parse(*uri); err == nil {
+			if u.Hostname() != "" {
+				*host = u.Hostname()
+			}
+			if u.Port() != "" {
+				if p, err := strconv.Atoi(u.Port()); err == nil {
+					*port = p
+				}
+			}
+			if u.User != nil {
+				*username = u.User.Username()
+				if pass, ok := u.User.Password(); ok {
+					*password = pass
+				}
+			}
+			if strings.HasPrefix(u.Scheme, "post") {
+				*engine = "postgres"
+			} else if strings.HasPrefix(u.Scheme, "my") {
+				*engine = "mysql"
+			} else if strings.HasPrefix(u.Scheme, "sqlite") {
+				*engine = "sqlite"
+				*path = u.Path
+			}
+		}
+	}
+
+	px, err := productexperience.New(os.TempDir())
+	if err != nil {
+		fmt.Println("error initializing probe engine:", err)
+		os.Exit(1)
+	}
+
+	res, err := px.ProbeDatabaseEngine(context.Background(), productexperience.EngineProbeRequest{
+		Engine:   *engine,
+		Host:     *host,
+		Port:     *port,
+		Username: *username,
+		Password: *password,
+		Path:     *path,
+	})
+	if err != nil {
+		fmt.Println("probe error:", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+
+	fmt.Printf("=== DBVault Engine Probe (%s) ===\n", strings.ToUpper(res.Engine))
+	fmt.Printf("Status:        %s\n", res.Status)
+	fmt.Printf("Engine Info:   %s\n", res.ServerVersion)
+	fmt.Printf("Latency:       %dms\n", res.LatencyMs)
+	fmt.Printf("Total DBs:     %d\n", res.TotalDatabases)
+	fmt.Printf("Total Size:    %d bytes\n\n", res.TotalSizeBytes)
+	if len(res.Databases) > 0 {
+		fmt.Println("Discovered Databases:")
+		for i, db := range res.Databases {
+			fmt.Printf("  [%d] %s (Size: %d bytes, Tables: %d, Encoding: %s)\n", i+1, db.Name, db.SizeBytes, db.TableCount, db.Encoding)
+			if db.Path != "" {
+				fmt.Printf("      Path: %s\n", db.Path)
+			}
+		}
+	}
+}
+

@@ -105,7 +105,7 @@ func TestProductExperienceRoutes(t *testing.T) {
 }
 
 func TestJobRoutesAndSSESnapshot(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
+	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestJobRoutesAndSSESnapshot(t *testing.T) {
 }
 
 func TestConnectedUIActionRoutes(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
+	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,3 +198,63 @@ func TestRestoreApprovalRoute(t *testing.T) {
 		t.Fatalf("approval status=%d body=%s", res.Code, res.Body.String())
 	}
 }
+
+func TestGarbageCollectionRoutes(t *testing.T) {
+	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := app.Handler()
+
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/gc/plan", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "ReclaimableBytes") {
+		t.Fatalf("gc plan status=%d body=%s", res.Code, res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/gc/run", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"status":"completed"`) {
+		t.Fatalf("gc run status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestNotificationChannelsCreateAndValidate(t *testing.T) {
+	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := app.Handler()
+
+	// Invalid URL rejection
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/notifications/channels", strings.NewReader(`{"name":"Bad URL","type":"webhook","url":"http://127.0.0.1:59999/unreachable"}`)))
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "unreachable") {
+		t.Fatalf("expected validation error status=%d body=%s", res.Code, res.Body.String())
+	}
+
+	// Channel with empty name rejected
+	res = httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/notifications/channels", strings.NewReader(`{"name":"","type":"email"}`)))
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for empty name, got %d", res.Code)
+	}
+}
+
+func TestSetupAutoCompletionWhenEnvIsSet(t *testing.T) {
+	t.Setenv("DBVAULT_DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/testdb")
+	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.setup.Required() {
+		t.Fatal("expected setup.Required() to be false when DBVAULT_DATABASE_URL is set")
+	}
+
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"setup_required":false`) {
+		t.Fatalf("expected setup_required=false, got status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+

@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'preact/hooks';
-import { Icon, LoadingState, ErrorBox } from '../ui.jsx';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import { Icon, Button, LoadingState, ErrorBox } from '../ui.jsx';
 import { JobsAPI } from '../../api/jobs.js';
 import { formatDate } from '../../format.js';
+import { Store } from '../../state.js';
 
 export function JobLogViewer({ jobId }) {
   const [logs, setLogs] = useState([]);
@@ -9,27 +10,54 @@ export function JobLogViewer({ jobId }) {
   const [error, setError] = useState(null);
   const [query, setQuery] = useState('');
   const [selectedLevel, setSelectedLevel] = useState('all');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const logTerminalRef = useRef(null);
 
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError(null);
-    JobsAPI.logs(jobId)
-      .then((res) => {
-        if (!active) return;
-        setLogs(res.logs || []);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (!active) return;
+  const fetchLogs = async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      setError(null);
+      const res = await JobsAPI.logs(jobId);
+      setLogs(res.logs || []);
+      if (!silent) setLoading(false);
+    } catch (err) {
+      if (!silent) {
         setError(err);
         setLoading(false);
-      });
-    return () => { active = false; };
+      }
+    }
+  };
+
+  useEffect(() => {
+    fetchLogs();
+    const interval = setInterval(() => {
+      fetchLogs(true);
+    }, 2000);
+    return () => clearInterval(interval);
   }, [jobId]);
 
-  if (loading) return <LoadingState label="Loading sanitised logs…" />;
-  if (error) return <ErrorBox error={error} retry={() => JobsAPI.logs(jobId).then((r) => setLogs(r.logs || []))} />;
+  useEffect(() => {
+    if (autoScroll && logTerminalRef.current) {
+      logTerminalRef.current.scrollTop = logTerminalRef.current.scrollHeight;
+    }
+  }, [logs, autoScroll]);
+
+  const handleDownloadLogs = () => {
+    const rawText = logs
+      .map((l) => `[${formatDate(l.created_at)}] [${(l.level || 'INFO').toUpperCase()}] [${l.stage || 'general'}] ${l.message}`)
+      .join('\n');
+    const blob = new Blob([rawText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dbvault-job-${jobId}.log`;
+    a.click();
+    URL.revokeObjectURL(url);
+    Store.toast('Log file downloaded', 'success');
+  };
+
+  if (loading) return <LoadingState label="Loading live execution stream…" />;
+  if (error) return <ErrorBox error={error} retry={() => fetchLogs()} />;
 
   const filtered = logs.filter((line) => {
     const matchesQuery = !query || `${line.level} ${line.message} ${line.stage}`.toLowerCase().includes(query.toLowerCase());
@@ -38,49 +66,88 @@ export function JobLogViewer({ jobId }) {
   });
 
   return (
-    <div className="job-log-viewer">
-      <div className="log-toolbar row-between mb-sm">
-        <div className="row-sm" style={{ flex: 1, maxWidth: '400px' }}>
+    <div className="job-log-viewer-enhanced">
+      {/* Log Console Toolbar */}
+      <div className="log-console-toolbar">
+        <div className="row-sm" style={{ flex: 1, maxWidth: '360px' }}>
           <div className="search-button" style={{ width: '100%' }}>
             <Icon name="search" size={14} />
             <input
               type="text"
-              placeholder="Search stage, level, or message…"
+              placeholder="Search stage, level, message…"
               aria-label="Search logs"
               value={query}
               onInput={(e) => setQuery(e.currentTarget.value)}
               style={{ width: '100%', border: 'none', background: 'transparent', outline: 'none', fontSize: '12px' }}
             />
+            {query && (
+              <button
+                type="button"
+                className="clear-search-btn"
+                onClick={() => setQuery('')}
+                aria-label="Clear search"
+              >
+                <Icon name="close" size={12} />
+              </button>
+            )}
           </div>
         </div>
+
         <div className="row-sm">
           <select
-            className="form-select"
+            className="form-select text-xs"
             value={selectedLevel}
             onChange={(e) => setSelectedLevel(e.currentTarget.value)}
             aria-label="Filter log level"
-            style={{ height: '32px' }}
+            style={{ height: '30px', padding: '0 8px' }}
           >
-            <option value="all">All levels</option>
+            <option value="all">All Levels</option>
             <option value="info">Info</option>
             <option value="warning">Warning</option>
             <option value="error">Error</option>
           </select>
-          <span className="log-count text-muted text-sm">{filtered.length} of {logs.length} lines</span>
+
+          <button
+            type="button"
+            className={`btn compact ${autoScroll ? 'secondary' : 'ghost'}`}
+            onClick={() => setAutoScroll(!autoScroll)}
+            title="Auto-scroll log terminal to bottom"
+          >
+            <span className={`status-dot ${autoScroll ? 'success' : 'neutral'}`} />
+            <span>Auto-scroll</span>
+          </button>
+
+          <Button
+            label="Download Log"
+            onClick={handleDownloadLogs}
+            tone="secondary compact"
+            icon="download"
+          />
+
+          <span className="log-count text-muted text-xs">
+            {filtered.length} / {logs.length} lines
+          </span>
         </div>
       </div>
 
-      <div className="log-viewer">
+      {/* Monospace Terminal Body */}
+      <div className="log-terminal-window" ref={logTerminalRef}>
         {filtered.length > 0 ? (
-          filtered.map((line, idx) => (
-            <div key={idx} className={`log-line ${line.level}`} style={{ display: 'flex', gap: '12px', padding: '2px 0' }}>
-              <time style={{ opacity: 0.6, whiteSpace: 'nowrap' }}>{formatDate(line.created_at)}</time>
-              <code style={{ color: line.level === 'error' ? '#f87171' : line.level === 'warning' ? '#fbbf24' : '#38bdf8', minWidth: '45px' }}>[{line.level}]</code>
-              <span>{line.message}</span>
-            </div>
-          ))
+          filtered.map((line, idx) => {
+            const levelTone = line.level === 'error' ? 'log-error' : line.level === 'warning' ? 'log-warn' : 'log-info';
+            return (
+              <div key={idx} className={`log-line-row ${levelTone}`}>
+                <span className="log-time">{formatDate(line.created_at)}</span>
+                <span className={`log-level-badge ${line.level}`}>{(line.level || 'INFO').toUpperCase()}</span>
+                {line.stage && <span className="log-stage-tag">{line.stage}</span>}
+                <span className="log-message-text">{line.message}</span>
+              </div>
+            );
+          })
         ) : (
-          <div style={{ padding: '16px', textAlign: 'center', opacity: 0.6 }}>No log entries match your filter</div>
+          <div className="log-empty-message">
+            <span>{logs.length === 0 ? 'No log entries recorded yet for this operation.' : 'No log lines match the current search filters.'}</span>
+          </div>
         )}
       </div>
     </div>

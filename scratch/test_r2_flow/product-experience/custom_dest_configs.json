@@ -1,0 +1,14 @@
+{
+  "r2-c00489ba": {
+    "id": "",
+    "name": "Cloudflare R2 Primary",
+    "provider": "r2",
+    "role": "primary",
+    "endpoint": "https://test.r2.cloudflarestorage.com",
+    "bucket": "my-test-bucket",
+    "region": "auto",
+    "prefix": "",
+    "access_key": "test_access_key",
+    "secret_key": "test_secret_key"
+  }
+}

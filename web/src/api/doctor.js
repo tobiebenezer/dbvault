@@ -1,1 +1,5 @@
-export const DoctorAPI = { run: () => API.doctor() };
+import { API } from '../api.js';
+
+export const DoctorAPI = {
+  run: () => API.doctor()
+};

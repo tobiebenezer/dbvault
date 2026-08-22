@@ -6,6 +6,8 @@ import { Store } from './state.js';
 
 export const ProductActions = {
   backup: (resource = defaultSource()) => queueJob('backup', resource, 'Backup queued'),
+  restore: (resource = defaultSource()) => queueJob('restore', resource, 'Database restore queued'),
+  sandbox: (resource = defaultSource()) => queueJob('sandbox', resource, 'Sandbox provisioning queued'),
   restoreDrill: (resource = defaultSource()) => queueJob('restore_drill', resource, 'Restore drill queued'),
   destinationTest: (destination) => queueJob('destination_test', { id: destination?.id || 'all-destinations', name: destination?.name || 'Storage destinations' }, 'Storage test queued'),
   retryReplication: (destination) => queueJob('replication', { id: destination?.id || 'contabo-replica', name: destination?.name || 'Contabo replica' }, 'Replication retry queued'),

@@ -4,43 +4,76 @@ import { AlertsStore } from '../state/alerts.js';
 import { Store } from '../state.js';
 import { nextReconnectDelay } from './reconnect.js';
 
+let activeSource = null;
+let isClosed = false;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+
 export function connectJobEvents() {
-  let source = null;
-  let closed = false;
-  let reconnectAttempt = 0;
-  let reconnectTimer = null;
+  isClosed = false;
 
   function open() {
-    if (closed) return;
+    if (isClosed) return;
+    if (activeSource) {
+      try { activeSource.close(); } catch (_) {}
+    }
+
     const last = Store.state.connection.lastEventId;
     const url = last ? `${EventsAPI.jobsPath()}?last_event_id=${encodeURIComponent(last)}` : EventsAPI.jobsPath();
-    source = new EventSource(url, { withCredentials: true });
-    source.onopen = async () => {
+    
+    try {
+      activeSource = new EventSource(url, { withCredentials: true });
+    } catch (e) {
+      JobsStore.setConnectionStatus('error', e.message);
+      scheduleReconnect();
+      return;
+    }
+
+    activeSource.onopen = async () => {
       reconnectAttempt = 0;
       JobsStore.setConnectionStatus('connected');
       await JobsStore.load();
       await AlertsStore.refresh();
     };
-    source.addEventListener('hello', () => JobsStore.setConnectionStatus('connected'));
-    for (const type of ['job.created', 'job.queued', 'job.started', 'job.progress', 'job.stage_changed', 'job.retrying', 'job.cancelling', 'job.cancelled', 'job.failed', 'job.completed', 'job.log', 'job.warning']) {
-      source.addEventListener(type, (message) => receive(message));
+
+    activeSource.addEventListener('hello', () => {
+      JobsStore.setConnectionStatus('connected');
+    });
+
+    const eventTypes = [
+      'job.created', 'job.queued', 'job.started', 'job.progress',
+      'job.stage_changed', 'job.retrying', 'job.cancelling', 'job.cancelled',
+      'job.failed', 'job.completed', 'job.log', 'job.warning'
+    ];
+
+    for (const type of eventTypes) {
+      activeSource.addEventListener(type, (message) => receive(message));
     }
-    source.onerror = () => {
-      if (closed) return;
+
+    activeSource.onerror = () => {
+      if (isClosed) return;
       JobsStore.setConnectionStatus('reconnecting');
-      try { source.close(); } catch (_) {}
-      const delay = nextReconnectDelay(reconnectAttempt++);
-      reconnectTimer = setTimeout(async () => {
-        await JobsStore.load();
-        open();
-      }, delay);
+      try { activeSource.close(); } catch (_) {}
+      scheduleReconnect();
     };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    const delay = nextReconnectDelay(reconnectAttempt++);
+    reconnectTimer = setTimeout(async () => {
+      await JobsStore.load().catch(() => {});
+      open();
+    }, Math.min(delay, 5000));
   }
 
   function receive(message) {
     try {
+      JobsStore.setConnectionStatus('connected');
       const data = JSON.parse(message.data);
-      if (message.lastEventId || data.event_id) JobsStore.setLastEventId(message.lastEventId || data.event_id);
+      if (message.lastEventId || data.event_id) {
+        JobsStore.setLastEventId(message.lastEventId || data.event_id);
+      }
       JobsStore.applyEvent(data);
       if (['job.completed', 'job.failed', 'job.cancelled'].includes(data.event_type)) {
         Store.refresh();
@@ -52,10 +85,10 @@ export function connectJobEvents() {
   }
 
   const handleUnload = () => {
-    closed = true;
+    isClosed = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    if (source) {
-      try { source.close(); } catch (_) {}
+    if (activeSource) {
+      try { activeSource.close(); } catch (_) {}
     }
   };
 
@@ -69,4 +102,13 @@ export function connectJobEvents() {
     window.removeEventListener('pagehide', handleUnload);
     JobsStore.setConnectionStatus('disconnected');
   };
+}
+
+export function forceReconnect() {
+  if (activeSource) {
+    try { activeSource.close(); } catch (_) {}
+  }
+  reconnectAttempt = 0;
+  JobsStore.setConnectionStatus('reconnecting');
+  connectJobEvents();
 }

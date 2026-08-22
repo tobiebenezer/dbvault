@@ -24,7 +24,7 @@ func (c FileCollector) Push(ctx context.Context, filePath, name string) (domain.
 	f, err := os.Open(filePath); if err != nil { return domain.TransactionLog{}, err }; defer f.Close()
 	h:=sha256.New(); n, err := io.Copy(h, f); if err != nil { return domain.TransactionLog{}, err }
 	_, _ = f.Seek(0,0); kind:=domain.LogMySQLBinlog; if c.Engine==domain.EngineMariaDB { kind=domain.LogMariaDBBinlog }
-	key := "logs/mysql/"+string(c.SourceID)+"/"+c.ServerID+"/"+name
+	key := string(c.SourceID)+"/binlog/"+c.ServerID+"/"+name
 	if c.Store != nil { _, err = c.Store.Put(ctx, ports.PutObjectRequest{Key:key, Body:f, Size:n, ContentType:"application/octet-stream", IfNotExists:true}); if err != nil { return domain.TransactionLog{}, err } }
 	now:=time.Now(); if c.Now!=nil { now=c.Now() }
 	return domain.TransactionLog{ID:domain.TransactionLogID(name), SourceID:c.SourceID, RepositoryID:c.RepositoryID, Kind:kind, NativeName:name, LogicalSize:n, StoredSize:n, Checksum:hex.EncodeToString(h.Sum(nil)), ObjectKey:key, Status:domain.LogVerified, CollectedAt:now, VerifiedAt:&now}, nil

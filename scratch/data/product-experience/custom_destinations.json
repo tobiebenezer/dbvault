@@ -1,0 +1,13 @@
+{
+  "r2-46cef913": {
+    "id": "r2-46cef913",
+    "name": "Cloudflare R2",
+    "provider": "r2",
+    "role": "primary",
+    "region": "auto",
+    "configured": false,
+    "status": "healthy",
+    "lag_seconds": 0,
+    "last_checked_at": "2026-08-16T19:57:42.885060899Z"
+  }
+}

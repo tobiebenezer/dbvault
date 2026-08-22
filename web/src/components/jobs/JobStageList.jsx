@@ -35,6 +35,7 @@ function stageNames(type) {
     restore_drill: ['create_workspace', 'restore', 'open_database', 'run_checks', 'record_evidence', 'cleanup', 'complete'],
     sandbox: ['reserve', 'create_runtime', 'restore', 'verify', 'publish_connection', 'schedule_expiry', 'complete'],
     replication: ['plan_missing_objects', 'copy', 'verify_replica', 'update_coverage', 'complete'],
+    destination_test: ['probe', 'put', 'get', 'delete', 'complete'],
     doctor: ['database', 'tools', 'storage', 'keys', 'disk', 'clock', 'tls', 'agent', 'restore_requirements', 'complete'],
     bundle: ['collect', 'redact', 'package', 'sign', 'verify', 'complete']
   }[type] || ['queued', 'running', 'complete'];

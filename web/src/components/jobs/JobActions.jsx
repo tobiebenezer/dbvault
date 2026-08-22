@@ -8,7 +8,13 @@ export function JobActions({ job = {} }) {
   const isFailed = job.status === 'failed';
 
   const handleCancel = async () => {
-    if (!confirm('Cancel this job at the next safe cancellation point?')) return;
+    const ok = await Store.confirm({
+      title: 'Cancel Active Job',
+      message: 'Are you sure you want to cancel this operation at the next safe cancellation point?',
+      confirmLabel: 'Cancel Job',
+      confirmTone: 'danger'
+    });
+    if (!ok) return;
     JobsStore.markCancelling(job.id);
     try {
       await JobsAPI.cancel(job.id);

@@ -1,37 +1,52 @@
-import { render } from 'preact';
-import { useState, useEffect, useRef } from 'preact/hooks';
+import { render, Component } from 'preact';
+import { useState, useEffect } from 'preact/hooks';
 import { Layout } from './components/layout.jsx';
 import { Store } from './state.js';
 import { JobsStore } from './state/jobs.js';
 import { AlertsStore } from './state/alerts.js';
 import { connectJobEvents } from './realtime/job-events.js';
 import { OverviewPage } from './pages/overview.jsx';
-import { SetupPage as _SetupPageDom } from './pages/setup.js';
+import { SetupPage } from './pages/setup.jsx';
 import { DatabasesPage, DatabaseDetailPage } from './pages/databases.jsx';
 import { RepositoriesPage } from './pages/repositories.jsx';
 import { RecoveryPage } from './pages/recovery.jsx';
+import { WarehousePage } from './pages/warehouse.jsx';
 import { JobsPage } from './pages/jobs.jsx';
 import { AlertsPage } from './pages/alerts.jsx';
 import { SettingsPage } from './pages/settings.jsx';
+import { BillingPage } from './pages/billing.jsx';
+import { AuditPage } from './pages/audit.jsx';
+import { TeamPage } from './pages/team.jsx';
+import { AdminFleetPage } from './pages/admin.jsx';
+import { TrustPage } from './pages/trust.jsx';
 
-// Bridge wrapper: mounts the legacy DOM-builder setup wizard into a Preact-owned div
-function SetupPage() {
-  const containerRef = useRef(null);
-  useEffect(() => {
-    if (!containerRef.current) return;
-    // Call the old imperative SetupPage which returns a real DOM element
-    const el = _SetupPageDom();
-    containerRef.current.replaceChildren(el);
-    // Re-run when Store refreshes (setup wizard steps change)
-    return Store.subscribe(() => {
-      // Only update if this container is still mounted
-      if (containerRef.current) {
-        const fresh = _SetupPageDom();
-        containerRef.current.replaceChildren(fresh);
-      }
-    });
-  }, []);
-  return <div ref={containerRef} className="setup-wrapper" />;
+export class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error) {
+    console.error('Captured UI Error:', error);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="page">
+          <div className="card" style={{ padding: '24px', borderLeft: '4px solid var(--color-danger, #f85149)' }}>
+            <h2>View temporarily unavailable</h2>
+            <p className="text-muted text-sm">{this.state.error?.message || String(this.state.error)}</p>
+            <button className="btn btn-primary mt-md" onClick={() => { this.setState({ hasError: false }); window.location.reload(); }}>
+              Reload Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 export function App() {
@@ -57,10 +72,22 @@ export function App() {
     PageComponent = <RepositoriesPage />;
   } else if (route.startsWith('/recovery')) {
     PageComponent = <RecoveryPage />;
+  } else if (route.startsWith('/warehouse')) {
+    PageComponent = <WarehousePage />;
   } else if (route.startsWith('/jobs')) {
     PageComponent = <JobsPage />;
   } else if (route.startsWith('/alerts')) {
     PageComponent = <AlertsPage />;
+  } else if (route.startsWith('/billing')) {
+    PageComponent = <BillingPage />;
+  } else if (route.startsWith('/audit')) {
+    PageComponent = <AuditPage />;
+  } else if (route.startsWith('/trust')) {
+    PageComponent = <TrustPage />;
+  } else if (route.startsWith('/team')) {
+    PageComponent = <TeamPage />;
+  } else if (route.startsWith('/admin')) {
+    PageComponent = <AdminFleetPage />;
   } else if (route.startsWith('/settings')) {
     PageComponent = <SettingsPage />;
   } else {
@@ -72,7 +99,11 @@ export function App() {
     );
   }
 
-  return <Layout>{PageComponent}</Layout>;
+  return (
+    <ErrorBoundary>
+      <Layout>{PageComponent}</Layout>
+    </ErrorBoundary>
+  );
 }
 
 // Initialise background stores and real-time SSE stream

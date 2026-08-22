@@ -1,0 +1,17 @@
+{
+  "mysql-courier": {
+    "id": "mysql-courier",
+    "name": "courier",
+    "engine": "mysql",
+    "version": "",
+    "environment": "production",
+    "protection": "protected",
+    "score": 100,
+    "last_backup_at": "2026-08-16T22:48:12.277578862Z",
+    "last_drill_at": "2026-08-16T22:48:12.277578862Z",
+    "destination_ids": [
+      "r2-primary"
+    ],
+    "repository_id": "production"
+  }
+}

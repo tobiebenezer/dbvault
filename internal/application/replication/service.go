@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	mf "github.com/dbvault/dbvault/internal/application/manifest"
 	"github.com/dbvault/dbvault/internal/domain"
@@ -56,7 +57,11 @@ func (s *Service) Replicate(ctx context.Context, snapshotID domain.SnapshotID, d
 		}
 		res.CopiedObjects++
 	}
-	for _, key := range []string{snap.ManifestObjectKey, fmt.Sprintf("snapshots/%s/%s/manifest.sig", snap.SourceID, snap.ID), snap.CompletionObjectKey} {
+	sigKey := strings.TrimSuffix(snap.ManifestObjectKey, ".json") + ".sig"
+	if sigKey == "" || sigKey == ".sig" {
+		sigKey = fmt.Sprintf("%s/snapshots/%s/manifest.sig", snap.SourceID, snap.ID)
+	}
+	for _, key := range []string{snap.ManifestObjectKey, sigKey, snap.CompletionObjectKey} {
 		if err := copyObject(ctx, s.Primary, target, key); err != nil {
 			return res, err
 		}

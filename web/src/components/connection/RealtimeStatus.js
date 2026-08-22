@@ -1,3 +1,7 @@
+import { h } from 'preact';
+import { Store } from '../../state.js';
+import { ConnectionState } from '../../state/connection.js';
+
 export function RealtimeStatus() {
   const status = Store.state.connection.status;
   const label = ConnectionState.label();

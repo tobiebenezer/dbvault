@@ -5,7 +5,7 @@ import { Store } from '../state.js';
 import { ProductActions } from '../actions.js';
 import { formatRelative } from '../format.js';
 
-export function AlertsPage() {
+export function AlertsPage({ embedded = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -33,8 +33,8 @@ export function AlertsPage() {
     });
   }, []);
 
-  if (loading) return <div className="page"><LoadingState label="Loading incidents & alerts…" /></div>;
-  if (error) return <div className="page"><ErrorBox error={error} retry={loadAlerts} /></div>;
+  if (loading) return <div className={embedded ? "" : "page"}><LoadingState label="Loading incidents & alerts…" /></div>;
+  if (error) return <div className={embedded ? "" : "page"}><ErrorBox error={error} retry={loadAlerts} /></div>;
 
   const all = data?.alerts || [];
   const active = all.filter((alert) => alert.status !== 'resolved');
@@ -43,14 +43,16 @@ export function AlertsPage() {
   const lastCheck = data?.last_checked_at || null;
 
   return (
-    <div className="page">
-      <PageHeader
-        title="Alerts & Incidents"
-        description="Active protection warnings, recovery chain gap alerts, and storage quota notifications."
-        actions={[
-          <Button key="doc" label="Run system doctor" onClick={() => ProductActions.doctor()} tone="secondary" />
-        ]}
-      />
+    <div className={embedded ? "" : "page"}>
+      {!embedded && (
+        <PageHeader
+          title="Alerts & Incidents"
+          description="Active protection warnings, recovery chain gap alerts, and storage quota notifications."
+          actions={[
+            <Button key="doc" label="Run system doctor" onClick={() => ProductActions.doctor()} tone="secondary" />
+          ]}
+        />
+      )}
 
       <SegmentedNav
         tabs={[

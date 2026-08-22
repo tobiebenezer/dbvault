@@ -1,4 +1,4 @@
-//go:build !restricted
+//go:build !restricted && cgo
 
 package sqlite
 
