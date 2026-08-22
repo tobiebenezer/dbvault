@@ -8,3 +8,9 @@ lakehouse/
 *.db-wal
 *.db-shm
 
+
+bin/
+dist/
+web/node_modules/
+.opencode/
+scratch/

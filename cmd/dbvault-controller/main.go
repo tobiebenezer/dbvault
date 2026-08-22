@@ -20,11 +20,20 @@ import (
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8081", "controller listen address")
 	token := flag.String("token", os.Getenv("DBVAULT_CONTROLLER_TOKEN"), "controller bearer token")
+	insecureDemo := flag.Bool("insecure-demo", false, "run without authentication (demos only; logs a loud warning)")
 	tlsCert := flag.String("tls-cert", "", "server TLS certificate")
 	tlsKey := flag.String("tls-key", "", "server TLS private key")
 	clientCA := flag.String("client-ca", "", "client CA for mutual TLS")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if *token == "" && !*insecureDemo {
+		fmt.Fprintln(os.Stderr, "refusing to start: controller token not configured")
+		fmt.Fprintln(os.Stderr, "set --token (or DBVAULT_CONTROLLER_TOKEN); pass --insecure-demo only for local demos")
+		os.Exit(2)
+	}
+	if *token == "" && *insecureDemo {
+		logger.Warn("controller running WITHOUT authentication (--insecure-demo)")
+	}
 	server := &http.Server{Addr: *listen, Handler: controllerapi.New(controlplane.NewStore(), *token).Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	if *tlsCert != "" || *tlsKey != "" {
 		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}

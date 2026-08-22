@@ -27,6 +27,7 @@ type Config struct {
 	Verification    VerificationConfig     `json:"verification,omitempty" yaml:"verification,omitempty"`
 	Notifications   NotificationConfig     `json:"notifications,omitempty" yaml:"notifications,omitempty"`
 	Metrics         MetricsConfig          `json:"metrics,omitempty" yaml:"metrics,omitempty"`
+	Security        SecurityConfig         `json:"security,omitempty" yaml:"security,omitempty"`
 	ControlPlane    ControlPlaneConfig     `json:"control_plane,omitempty" yaml:"control_plane,omitempty"`
 
 	// Legacy Phase 2 fields are retained for config migration only.
@@ -318,6 +319,9 @@ type WebhookNotificationConfig struct {
 type MetricsConfig struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
 	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
+}
+type SecurityConfig struct {
+	AllowMasterKeyReveal bool `json:"allow_master_key_reveal" yaml:"allow_master_key_reveal"`
 }
 type ControlPlaneConfig struct {
 	Enabled            bool   `json:"enabled" yaml:"enabled"`

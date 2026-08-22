@@ -821,6 +821,7 @@ func serverCmd(args []string) {
 		}
 	}
 
+	allowReveal := false
 	if *cfgPath != "" {
 		cfg, err := config.Load(*cfgPath)
 		if err != nil {
@@ -834,19 +835,16 @@ func serverCmd(args []string) {
 		if *dataDir == "/var/lib/dbvault" && cfg.Server.DataDirectory != "" {
 			*dataDir = cfg.Server.DataDirectory
 		}
+		allowReveal = cfg.Security.AllowMasterKeyReveal
 	}
 	api := controllerapi.New(controlplane.NewStore(), *token).Handler()
-	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev", Demo: *demo}, api, slog.Default())
+	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev", Demo: *demo, AllowMasterKeyReveal: allowReveal}, api, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if appDbURL == "" {
-		if token, err := appliance.EnsureSetupToken(); err == nil && token != "" {
-			fmt.Println("setup token:", token)
-		}
-	} else {
-		_ = os.Remove(filepath.Join(*dataDir, "setup-token"))
+	if token, err := appliance.EnsureSetupToken(); err == nil && token != "" {
+		fmt.Println("setup token:", token)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -1084,4 +1082,3 @@ func probeCmd(args []string) {
 		}
 	}
 }
-

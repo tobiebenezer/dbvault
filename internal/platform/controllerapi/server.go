@@ -14,9 +14,10 @@ import (
 )
 
 type Server struct {
-	Store *controlplane.Store
-	Token string
-	Now   func() time.Time
+	Store        *controlplane.Store
+	Token        string
+	InsecureDemo bool
+	Now          func() time.Time
 }
 
 func New(store *controlplane.Store, token string) *Server {
@@ -45,6 +46,10 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.Token == "" && !s.InsecureDemo {
+			writeError(w, http.StatusServiceUnavailable, "controller token not configured")
+			return
+		}
 		if s.Token != "" {
 			provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 			if len(provided) != len(s.Token) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.Token)) != 1 {

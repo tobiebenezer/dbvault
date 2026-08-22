@@ -68,95 +68,30 @@ func TestAgentInstallScriptRoute(t *testing.T) {
 }
 
 func TestProductExperienceRoutes(t *testing.T) {
-	dir := t.TempDir()
-	app, err := New(Config{Listen: "127.0.0.1:0", DataDirectory: dir}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := app.Handler()
+	f := newAuthedFixture(t, Config{Listen: "127.0.0.1:0"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil)
-	res := httptest.NewRecorder()
-	h.ServeHTTP(res, req)
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "protected_databases") {
-		t.Fatalf("overview status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/sources/prod/recovery-timeline", nil)
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, req)
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "continuous") {
-		t.Fatalf("timeline status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/policies/simulate", strings.NewReader(`{"policy":{"backup_frequency":"Every 12 hours","replica_count":2}}`))
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, req)
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "estimated_thirty_day_bytes") {
-		t.Fatalf("simulate status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"source_id":"prod","engine":"postgres"}`))
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, req)
-	if res.Code != http.StatusAccepted || !strings.Contains(res.Body.String(), "sandbox-") {
-		t.Fatalf("sandbox status=%d body=%s", res.Code, res.Body.String())
-	}
+	mustOK(t, f.do(t, http.MethodGet, "/api/v1/overview", ""), http.StatusOK, "protected_databases")
+	mustOK(t, f.do(t, http.MethodGet, "/api/v1/sources/prod/recovery-timeline", ""), http.StatusOK, "continuous")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/policies/simulate", `{"policy":{"backup_frequency":"Every 12 hours","replica_count":2}}`), http.StatusOK, "estimated_thirty_day_bytes")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/sandboxes", `{"source_id":"prod","engine":"postgres"}`), http.StatusAccepted, "sandbox-")
 }
 
 func TestJobRoutesAndSSESnapshot(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := app.Handler()
+	f := newAuthedFixture(t, Config{Demo: true})
 
-	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "job-backup-demo") {
-		t.Fatalf("jobs status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/events/jobs?once=1", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "event: job.") {
-		t.Fatalf("sse status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-backup-demo/cancel", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "cancelled") {
-		t.Fatalf("cancel status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job-replica-demo/retry", nil))
-	if res.Code != http.StatusAccepted || !strings.Contains(res.Body.String(), "new_job_id") {
-		t.Fatalf("retry status=%d body=%s", res.Code, res.Body.String())
-	}
+	mustOK(t, f.do(t, http.MethodGet, "/api/v1/jobs", ""), http.StatusOK, "job-backup-demo")
+	mustOK(t, f.do(t, http.MethodGet, "/api/v1/events/jobs?once=1", ""), http.StatusOK, "event: job.")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/jobs/job-backup-demo/cancel", ""), http.StatusOK, "cancelled")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/jobs/job-replica-demo/retry", ""), http.StatusAccepted, "new_job_id")
 }
 
 func TestConnectedUIActionRoutes(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := app.Handler()
+	f := newAuthedFixture(t, Config{Demo: true})
 
-	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/inventory", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "contabo-replica") {
-		t.Fatalf("inventory status=%d body=%s", res.Code, res.Body.String())
-	}
+	mustOK(t, f.do(t, http.MethodGet, "/api/v1/inventory", ""), http.StatusOK, "contabo-replica")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/setup/current-step", `{"step":"run-doctor"}`), http.StatusOK, "run-doctor")
 
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/setup/current-step", strings.NewReader(`{"step":"run-doctor"}`)))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "run-doctor") {
-		t.Fatalf("setup step status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/agents/local/discover", strings.NewReader(`{"roots":[]}`)))
+	res := f.do(t, http.MethodPost, "/api/v1/agents/local/discover", `{"roots":[]}`)
 	if res.Code != http.StatusOK {
 		t.Fatalf("discover status=%d body=%s", res.Code, res.Body.String())
 	}
@@ -168,93 +103,55 @@ func TestConnectedUIActionRoutes(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &discovered); err != nil || len(discovered.Discoveries) == 0 {
 		t.Fatalf("discover body=%s err=%v", res.Body.String(), err)
 	}
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/discoveries/"+discovered.Discoveries[0].ID+"/adopt", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "adopted") {
-		t.Fatalf("adopt status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/alerts/alert-contabo-lag/acknowledge", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "acknowledged") {
-		t.Fatalf("acknowledge status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"source_id":"prod","engine":"postgres"}`)))
-	if res.Code != http.StatusAccepted || !strings.Contains(res.Body.String(), "job_id") {
-		t.Fatalf("sandbox job status=%d body=%s", res.Code, res.Body.String())
-	}
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/discoveries/"+discovered.Discoveries[0].ID+"/adopt", ""), http.StatusOK, "adopted")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/alerts/alert-contabo-lag/acknowledge", ""), http.StatusOK, "acknowledged")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/sandboxes", `{"source_id":"prod","engine":"postgres"}`), http.StatusAccepted, "job_id")
 }
 
 func TestRestoreApprovalRoute(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := httptest.NewRecorder()
-	app.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/approvals", strings.NewReader(`{"source_id":"production-postgres","reason":"bad deployment","target":"production replacement","requested_by":"console"}`)))
-	if res.Code != http.StatusCreated || !strings.Contains(res.Body.String(), `"status":"pending"`) {
-		t.Fatalf("approval status=%d body=%s", res.Code, res.Body.String())
-	}
+	f := newAuthedFixture(t, Config{})
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/approvals", `{"source_id":"production-postgres","reason":"bad deployment","target":"production replacement","requested_by":"console"}`), http.StatusCreated, `"status":"pending"`)
 }
 
 func TestGarbageCollectionRoutes(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir(), Demo: true}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := app.Handler()
-
-	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/gc/plan", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "ReclaimableBytes") {
-		t.Fatalf("gc plan status=%d body=%s", res.Code, res.Body.String())
-	}
-
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/gc/run", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"status":"completed"`) {
-		t.Fatalf("gc run status=%d body=%s", res.Code, res.Body.String())
-	}
+	f := newAuthedFixture(t, Config{Demo: true})
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/gc/plan", ""), http.StatusOK, "ReclaimableBytes")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/gc/run", ""), http.StatusOK, `"status":"completed"`)
 }
 
 func TestNotificationChannelsCreateAndValidate(t *testing.T) {
-	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
+	f := newAuthedFixture(t, Config{})
+
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/notifications/channels", `{"name":"Bad URL","type":"webhook","url":"http://127.0.0.1:59999/unreachable"}`), http.StatusBadRequest, "unreachable")
+	mustOK(t, f.do(t, http.MethodPost, "/api/v1/notifications/channels", `{"name":"","type":"email"}`), http.StatusBadRequest)
+}
+
+// TestSetupRequiredRegardlessOfEnvDBURL pins the A5 fix: DBVAULT_DATABASE_URL
+// must not bypass setup; bootstrap still demands a valid one-time token.
+func TestSetupRequiredRegardlessOfEnvDBURL(t *testing.T) {
+	t.Setenv("DBVAULT_DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/testdb")
+	dir := t.TempDir()
+	app, err := New(Config{DataDirectory: dir, SetupTokenPath: filepath.Join(dir, "setup-token")}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	token, err := app.EnsureSetupToken()
+	if err != nil || token == "" {
+		t.Fatalf("setup token must be ensured even with external DB URL: %q err=%v", token, err)
 	}
 	h := app.Handler()
 
-	// Invalid URL rejection
-	res := httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/notifications/channels", strings.NewReader(`{"name":"Bad URL","type":"webhook","url":"http://127.0.0.1:59999/unreachable"}`)))
-	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "unreachable") {
-		t.Fatalf("expected validation error status=%d body=%s", res.Code, res.Body.String())
+	wrong := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]string{"setup_token": "wrong-token-value", "username": "admin", "password": testAdminPass})
+	h.ServeHTTP(wrong, httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewReader(body)))
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("invalid token with env set: status=%d want=403 body=%s", wrong.Code, wrong.Body.String())
 	}
 
-	// Channel with empty name rejected
-	res = httptest.NewRecorder()
-	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/v1/notifications/channels", strings.NewReader(`{"name":"","type":"email"}`)))
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("expected bad request for empty name, got %d", res.Code)
+	right := httptest.NewRecorder()
+	body, _ = json.Marshal(map[string]string{"setup_token": token, "username": "admin", "password": testAdminPass})
+	h.ServeHTTP(right, httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewReader(body)))
+	if right.Code != http.StatusCreated {
+		t.Fatalf("valid token with env set: status=%d want=201 body=%s", right.Code, right.Body.String())
 	}
 }
-
-func TestSetupAutoCompletionWhenEnvIsSet(t *testing.T) {
-	t.Setenv("DBVAULT_DATABASE_URL", "postgresql://postgres:test@127.0.0.1:5432/testdb")
-	app, err := New(Config{DataDirectory: t.TempDir()}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if app.setup.Required() {
-		t.Fatal("expected setup.Required() to be false when DBVAULT_DATABASE_URL is set")
-	}
-
-	res := httptest.NewRecorder()
-	app.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil))
-	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"setup_required":false`) {
-		t.Fatalf("expected setup_required=false, got status=%d body=%s", res.Code, res.Body.String())
-	}
-}
-

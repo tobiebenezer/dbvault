@@ -24,6 +24,7 @@ import (
 	"github.com/dbvault/dbvault/internal/adapters/warehouse"
 	"github.com/dbvault/dbvault/internal/application/productexperience"
 	"github.com/dbvault/dbvault/internal/domain"
+	authmw "github.com/dbvault/dbvault/internal/server/middleware/auth"
 )
 
 //go:embed web/dist/*
@@ -47,13 +48,15 @@ type TLSConfig struct {
 }
 
 type Config struct {
-	Listen         string
-	PublicURL      string
-	DataDirectory  string
-	SetupTokenPath string
-	Version        string
-	Demo           bool
-	TLS            TLSConfig
+	Listen               string
+	PublicURL            string
+	DataDirectory        string
+	SetupTokenPath       string
+	Version              string
+	Demo                 bool
+	AllowMasterKeyReveal bool
+	MetricsPath          string
+	TLS                  TLSConfig
 }
 
 type Appliance struct {
@@ -63,6 +66,7 @@ type Appliance struct {
 	logger    *slog.Logger
 	setup     *SetupManager
 	px        *productexperience.Service
+	authn     *authmw.Middleware
 	readyMu   sync.RWMutex
 	ready     bool
 	startedAt time.Time
@@ -78,9 +82,6 @@ func New(cfg Config, api http.Handler, logger *slog.Logger) (*Appliance, error) 
 	if cfg.SetupTokenPath == "" {
 		cfg.SetupTokenPath = filepath.Join(cfg.DataDirectory, "setup-token")
 	}
-	if os.Getenv("DBVAULT_DATABASE_URL") != "" || os.Getenv("DATABASE_URL") != "" {
-		_ = os.Remove(cfg.SetupTokenPath)
-	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
@@ -95,11 +96,22 @@ func New(cfg Config, api http.Handler, logger *slog.Logger) (*Appliance, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &Appliance{cfg: cfg, api: api, assets: assets, logger: logger, setup: &SetupManager{Path: cfg.SetupTokenPath}, px: px, startedAt: time.Now().UTC()}, nil
+	authStore, err := authmw.NewStore(filepath.Join(cfg.DataDirectory, "auth-state.json"))
+	if err != nil {
+		return nil, err
+	}
+	authn := authmw.NewMiddleware(authStore)
+	authn.SetLogger(logger)
+	if cfg.MetricsPath != "" {
+		authn.SetMetricsPath(cfg.MetricsPath)
+	}
+	return &Appliance{cfg: cfg, api: api, assets: assets, logger: logger, setup: &SetupManager{Path: cfg.SetupTokenPath}, px: px, authn: authn, startedAt: time.Now().UTC()}, nil
 }
 
 func (a *Appliance) Handler() http.Handler {
 	mux := http.NewServeMux()
+	a.authn.RegisterPublic(mux, a.setup.Verify, a.setup.Consume)
+	a.authn.RegisterProtected(mux)
 	mux.HandleFunc("/health", a.health)
 	mux.HandleFunc("/ready", a.readyHandler)
 	mux.HandleFunc("/api/v1/status", a.status)
@@ -194,7 +206,7 @@ func (a *Appliance) Handler() http.Handler {
 	mux.HandleFunc("/favicon.ico", a.favicon)
 	mux.HandleFunc("/assets/", a.staticAsset)
 	mux.HandleFunc("/", a.spa)
-	return securityHeaders(limitHeaders(mux))
+	return securityHeaders(limitHeaders(a.authn.Protect(mux)))
 }
 
 func (a *Appliance) HTTPServer() *http.Server {
@@ -1612,9 +1624,6 @@ func (s *SetupManager) Ensure() (string, error) {
 }
 
 func (s *SetupManager) Required() bool {
-	if os.Getenv("DBVAULT_DATABASE_URL") != "" || os.Getenv("DATABASE_URL") != "" {
-		return false
-	}
 	if s.Path == "" {
 		return true
 	}
@@ -1622,11 +1631,31 @@ func (s *SetupManager) Required() bool {
 	return err == nil && strings.TrimSpace(string(b)) != ""
 }
 
+// Verify checks a setup token without consuming it.
+func (s *SetupManager) Verify(token string) error {
+	b, err := os.ReadFile(s.Path)
+	if err != nil {
+		return err
+	}
+	expected := strings.TrimSpace(string(b))
+	provided := strings.TrimSpace(token)
+	if len(provided) != len(expected) || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		return errors.New("invalid setup token")
+	}
+	return nil
+}
+
+// Consume invalidates the setup token after successful bootstrap.
+func (s *SetupManager) Consume() error {
+	return os.Remove(s.Path)
+}
+
 func (a *Appliance) keysMasterStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, a.px.GetMasterKeyInfo())
 }
 
@@ -1635,11 +1664,18 @@ func (a *Appliance) keysMasterReveal(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.cfg.AllowMasterKeyReveal {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "master key reveal is disabled; set security.allow_master_key_reveal=true to enable"})
+		return
+	}
 	secret, err := a.px.RevealMasterKey()
 	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, secret)
 }
 
@@ -1660,6 +1696,7 @@ func (a *Appliance) keysMasterSet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, info)
 }
 
@@ -1673,6 +1710,7 @@ func (a *Appliance) keysMasterGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, secret)
 }
 
