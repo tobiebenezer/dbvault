@@ -63,6 +63,10 @@ type Options struct {
 
 	// Now allows tests to drive time with a fake clock.
 	Now func() time.Time
+
+	// OnRecoverExpired is invoked after each sweep with the number of
+	// expired leases recovered; observability hooks must stay non-fatal.
+	OnRecoverExpired func(count int)
 }
 
 type Scheduler struct {
@@ -237,6 +241,9 @@ func (s *Scheduler) recoverExpired(ctx context.Context) error {
 	}
 	if len(recovered) > 0 {
 		s.log.Warn("recovered expired leases", "count", len(recovered), "job_ids", recovered)
+		if s.opts.OnRecoverExpired != nil {
+			s.opts.OnRecoverExpired(len(recovered))
+		}
 	}
 	return nil
 }

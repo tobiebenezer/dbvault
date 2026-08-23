@@ -174,3 +174,13 @@ func (c *memoryCore) recoverExpiredLocked(now time.Time) []domain.JobID {
 	}
 	return out
 }
+
+func (c *memoryCore) depthLocked() int {
+	n := 0
+	for _, j := range c.jobs {
+		if !j.Terminal() {
+			n++
+		}
+	}
+	return n
+}

@@ -142,3 +142,10 @@ func (q *Queue) RecoverExpired(ctx context.Context, now time.Time) ([]domain.Job
 	}
 	return out, nil
 }
+
+// Depth reports the number of live (non-terminal) jobs.
+func (q *Queue) Depth(ctx context.Context) (int, error) {
+	q.core.mu.Lock()
+	defer q.core.mu.Unlock()
+	return q.core.depthLocked(), nil
+}

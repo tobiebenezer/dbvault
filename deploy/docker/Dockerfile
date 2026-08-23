@@ -44,6 +44,6 @@ COPY --from=build /out/ /usr/local/bin/
 USER nonroot:nonroot
 VOLUME ["/var/lib/dbvault"]
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/dbvault", "doctor"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/dbvault", "doctor", "--config", "/etc/dbvault/dbvault.yaml"]
 ENTRYPOINT ["/usr/local/bin/dbvault"]
 CMD ["server", "--listen", "0.0.0.0:8080", "--data-dir", "/var/lib/dbvault"]

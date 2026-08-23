@@ -401,6 +401,20 @@ func (q *Queue) RecoverExpired(ctx context.Context, now time.Time) ([]domain.Job
 	return out, nil
 }
 
+// Depth reports the number of live (non-terminal) jobs.
+func (q *Queue) Depth(ctx context.Context) (int, error) {
+	if q.db == nil {
+		q.core.mu.Lock()
+		defer q.core.mu.Unlock()
+		return q.core.depthLocked(), nil
+	}
+	var n int
+	if err := q.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed','cancelled','dead_letter')`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (q *Queue) loadLocked(ctx context.Context, tx *sql.Tx, jobID domain.JobID) (domain.Job, error) {
 	row := tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM jobs WHERE id=?`, jobID)
 	j, err := scanJob(row.Scan)

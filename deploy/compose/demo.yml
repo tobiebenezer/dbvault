@@ -12,9 +12,10 @@ services:
       - "8080:8080"
     volumes:
       - dbvault-data:/var/lib/dbvault
+      - ./demo.config.yaml:/etc/dbvault/dbvault.yaml:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "/usr/local/bin/dbvault", "doctor"]
+      test: ["CMD", "/usr/local/bin/dbvault", "doctor", "--config", "/etc/dbvault/dbvault.yaml"]
       interval: 30s
       timeout: 5s
       retries: 3

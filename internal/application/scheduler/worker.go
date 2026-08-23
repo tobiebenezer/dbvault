@@ -33,7 +33,7 @@ type WorkerOptions struct {
 	LeaseDuration time.Duration    // default 5m
 	PollInterval  time.Duration    // default 500ms
 	Logger        *slog.Logger
-	OnSettled     func(job domain.Job, execErr error) // invoked after Complete/Fail
+	OnSettled     func(job domain.Job, execErr error, result []byte) // invoked after Complete/Fail with executor result JSON
 }
 
 // WorkerPool leases jobs from the queue and drives them to completion. Each
@@ -162,6 +162,6 @@ func (p *WorkerPool) step(ctx context.Context, workerID string) {
 		}
 	}
 	if p.opts.OnSettled != nil {
-		p.opts.OnSettled(job, execErr)
+		p.opts.OnSettled(job, execErr, resultJSON)
 	}
 }

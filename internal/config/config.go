@@ -119,6 +119,7 @@ func applyLegacy(c *Config, m map[string]string) {
 	setI("repository.retention.weekly", &c.Repository.Retention.Weekly)
 	setI("repository.retention.monthly", &c.Repository.Retention.Monthly)
 	setS("repository.retention.tombstone_grace", &c.Repository.Retention.TombstoneGrace)
+	setS("repository.retention.gc_sweep_interval", &c.Repository.Retention.GCSweepInterval)
 	setS("destination.id", &c.Destination.ID)
 	setS("destination.driver", &c.Destination.Driver)
 	setS("destination.path", &c.Destination.Path)
@@ -135,4 +136,10 @@ func applyLegacy(c *Config, m map[string]string) {
 	setS("schedule.timezone", &c.Schedule.Timezone)
 	setI("schedule.workers", &c.Schedule.Workers)
 	setB("security.allow_master_key_reveal", &c.Security.AllowMasterKeyReveal)
+	setI64("doctor.min_free_bytes", &c.Doctor.MinFreeBytes)
+	setB("notifications.webhook.enabled", &c.Notifications.Webhook.Enabled)
+	setS("notifications.webhook.url", &c.Notifications.Webhook.URL.Literal)
+	setS("notifications.webhook.signing_secret", &c.Notifications.Webhook.SigningSecret.Literal)
+	setB("metrics.enabled", &c.Metrics.Enabled)
+	setS("metrics.path", &c.Metrics.Path)
 }

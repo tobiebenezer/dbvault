@@ -28,6 +28,7 @@ type Config struct {
 	Notifications   NotificationConfig     `json:"notifications,omitempty" yaml:"notifications,omitempty"`
 	Metrics         MetricsConfig          `json:"metrics,omitempty" yaml:"metrics,omitempty"`
 	Security        SecurityConfig         `json:"security,omitempty" yaml:"security,omitempty"`
+	Doctor          DoctorConfig           `json:"doctor,omitempty" yaml:"doctor,omitempty"`
 	ControlPlane    ControlPlaneConfig     `json:"control_plane,omitempty" yaml:"control_plane,omitempty"`
 
 	// Legacy Phase 2 fields are retained for config migration only.
@@ -197,6 +198,7 @@ type RetentionConfig struct {
 	Monthly                  int    `json:"monthly" yaml:"monthly"`
 	MinimumVerifiedSnapshots int    `json:"minimum_verified_snapshots,omitempty" yaml:"minimum_verified_snapshots,omitempty"`
 	TombstoneGrace           string `json:"tombstone_grace,omitempty" yaml:"tombstone_grace,omitempty"`
+	GCSweepInterval          string `json:"gc_sweep_interval,omitempty" yaml:"gc_sweep_interval,omitempty"`
 }
 type BudgetConfig struct {
 	MaximumPhysicalBytes string `json:"maximum_physical_bytes,omitempty" yaml:"maximum_physical_bytes,omitempty"`
@@ -334,6 +336,9 @@ type MetricsConfig struct {
 type SecurityConfig struct {
 	AllowMasterKeyReveal bool `json:"allow_master_key_reveal" yaml:"allow_master_key_reveal"`
 }
+type DoctorConfig struct {
+	MinFreeBytes int64 `json:"min_free_bytes,omitempty" yaml:"min_free_bytes,omitempty"`
+}
 type ControlPlaneConfig struct {
 	Enabled            bool   `json:"enabled" yaml:"enabled"`
 	Mode               string `json:"mode,omitempty" yaml:"mode,omitempty"`
@@ -359,6 +364,7 @@ type Repository struct {
 type Retention struct {
 	KeepLast, Daily, Weekly, Monthly int
 	TombstoneGrace                   string
+	GCSweepInterval                  string
 }
 type Destination struct {
 	ID, Driver, Path, Profile, Endpoint, Region, Bucket, Prefix, AccessKeyID, SecretAccessKey, AccessKeyIDFile, SecretAccessKeyFile, AccessKeyIDEnv, SecretAccessKeyEnv string
@@ -442,7 +448,7 @@ func (c *Config) Normalize() {
 			budget = strconv.FormatInt(c.Repository.BudgetBytes, 10)
 		}
 		keyProvider := "local-files"
-		c.Repositories = []RepositoryConfig{{ID: c.Repository.ID, Mode: "single", Primary: &RepositoryPrimary{Destination: c.Destination.ID}, Encryption: RepositoryEncryptionConfig{KeyProvider: keyProvider, ActiveKey: c.Repository.KeyID}, Signing: RepositorySigningConfig{KeyProvider: keyProvider, KeyID: "signing-local"}, Compression: RepositoryCompressionConfig{Algorithm: "zstd", Level: 6, MinimumSavingsPercent: 5}, Chunking: RepositoryChunkingConfig{SQLite: ChunkStrategyConfig{Strategy: "page-aligned", TargetSize: bytesString(c.Repository.ChunkBytes)}}, Retention: RetentionConfig{KeepLast: c.Repository.Retention.KeepLast, Daily: c.Repository.Retention.Daily, Weekly: c.Repository.Retention.Weekly, Monthly: c.Repository.Retention.Monthly, MinimumVerifiedSnapshots: 2, TombstoneGrace: c.Repository.Retention.TombstoneGrace}, Budget: BudgetConfig{MaximumPhysicalBytes: budget, ReservePercent: 15}}}
+		c.Repositories = []RepositoryConfig{{ID: c.Repository.ID, Mode: "single", Primary: &RepositoryPrimary{Destination: c.Destination.ID}, Encryption: RepositoryEncryptionConfig{KeyProvider: keyProvider, ActiveKey: c.Repository.KeyID}, Signing: RepositorySigningConfig{KeyProvider: keyProvider, KeyID: "signing-local"}, Compression: RepositoryCompressionConfig{Algorithm: "zstd", Level: 6, MinimumSavingsPercent: 5}, Chunking: RepositoryChunkingConfig{SQLite: ChunkStrategyConfig{Strategy: "page-aligned", TargetSize: bytesString(c.Repository.ChunkBytes)}}, Retention: RetentionConfig{KeepLast: c.Repository.Retention.KeepLast, Daily: c.Repository.Retention.Daily, Weekly: c.Repository.Retention.Weekly, Monthly: c.Repository.Retention.Monthly, MinimumVerifiedSnapshots: 2, TombstoneGrace: c.Repository.Retention.TombstoneGrace, GCSweepInterval: c.Repository.Retention.GCSweepInterval}, Budget: BudgetConfig{MaximumPhysicalBytes: budget, ReservePercent: 15}}}
 	}
 	if len(c.Sources) == 0 && c.Source.ID != "" {
 		enabled := c.Source.Enabled
@@ -575,7 +581,7 @@ func (c *Config) syncLegacy() {
 		r := c.Repositories[0]
 		chunk, _ := ParseBytes(r.Chunking.SQLite.TargetSize)
 		budget, _ := ParseBytes(r.Budget.MaximumPhysicalBytes)
-		c.Repository = Repository{ID: r.ID, Name: r.ID, ChunkBytes: chunk, KeyID: r.Encryption.ActiveKey, Retention: Retention{KeepLast: r.Retention.KeepLast, Daily: r.Retention.Daily, Weekly: r.Retention.Weekly, Monthly: r.Retention.Monthly, TombstoneGrace: r.Retention.TombstoneGrace}, BudgetBytes: budget}
+		c.Repository = Repository{ID: r.ID, Name: r.ID, ChunkBytes: chunk, KeyID: r.Encryption.ActiveKey, Retention: Retention{KeepLast: r.Retention.KeepLast, Daily: r.Retention.Daily, Weekly: r.Retention.Weekly, Monthly: r.Retention.Monthly, TombstoneGrace: r.Retention.TombstoneGrace, GCSweepInterval: r.Retention.GCSweepInterval}, BudgetBytes: budget}
 	}
 	if len(c.Destinations) > 0 {
 		d := c.Destinations[0]

@@ -56,6 +56,7 @@ type Config struct {
 	Demo                 bool
 	AllowMasterKeyReveal bool
 	MetricsPath          string
+	MetricsHandler       http.Handler // mounted at MetricsPath when both are set
 	TLS                  TLSConfig
 }
 
@@ -112,6 +113,11 @@ func (a *Appliance) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.authn.RegisterPublic(mux, a.setup.Verify, a.setup.Consume)
 	a.authn.RegisterProtected(mux)
+	if a.cfg.MetricsHandler != nil && a.cfg.MetricsPath != "" {
+		// Phase C: Prometheus text exposition. The auth middleware already
+		// exempts this path so scrapers can reach it without a session.
+		mux.Handle(a.cfg.MetricsPath, a.cfg.MetricsHandler)
+	}
 	mux.HandleFunc("/health", a.health)
 	mux.HandleFunc("/ready", a.readyHandler)
 	mux.HandleFunc("/api/v1/status", a.status)

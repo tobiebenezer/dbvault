@@ -26,12 +26,13 @@ import (
 )
 
 type Application struct {
-	Config    config.Config
-	Binding   config.RuntimeBinding
-	Catalogue *catsqlite.Catalogue
-	Backup    *backup.Service
-	Restore   *restore.Service
-	Close     func(context.Context) error
+	Config      config.Config
+	Binding     config.RuntimeBinding
+	Catalogue   *catsqlite.Catalogue
+	ObjectStore ports.ObjectStore
+	Backup      *backup.Service
+	Restore     *restore.Service
+	Close       func(context.Context) error
 }
 
 func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Application, error) {
@@ -96,7 +97,7 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applic
 	comp := zstdc.New(binding.Repository.Compression.Level, binding.Repository.Compression.MinimumSavingsPercent)
 	bsvc := &backup.Service{Catalogue: cat, Source: srcsqlite.New(""), Store: store, Scratch: scratch.New(cfg.Server.ScratchDirectory), Compressor: comp, Encryptor: enc, Signer: signer, Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: material.Secret, Repository: repo, TargetChunkBytes: chunkBytes}
 	rsvc := &restore.Service{Catalogue: cat, Store: store, Compressor: comp, Encryptor: enc, Signer: signer}
-	return &Application{Config: cfg, Binding: binding, Catalogue: cat, Backup: bsvc, Restore: rsvc, Close: func(context.Context) error { return cat.Close() }}, nil
+	return &Application{Config: cfg, Binding: binding, Catalogue: cat, ObjectStore: store, Backup: bsvc, Restore: rsvc, Close: func(context.Context) error { return cat.Close() }}, nil
 }
 
 func keyProviderRoot(cfg config.Config, id string) (string, error) {

@@ -17,6 +17,11 @@ type JobQueue interface {
 	RecoverExpired(ctx context.Context, now time.Time) ([]domain.JobID, error)
 }
 
+// QueueDepthReporter optionally exposes the number of live jobs in a queue.
+type QueueDepthReporter interface {
+	Depth(ctx context.Context) (int, error)
+}
+
 type FaultInjector interface {
 	Check(ctx context.Context, point string, metadata map[string]string) error
 }

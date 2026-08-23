@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -25,14 +26,18 @@ import (
 	"github.com/dbvault/dbvault/internal/adapters/id"
 	jobqueue "github.com/dbvault/dbvault/internal/adapters/jobqueue/sqlite"
 	ms "github.com/dbvault/dbvault/internal/adapters/manifest"
+	"github.com/dbvault/dbvault/internal/adapters/notification/webhook"
 	"github.com/dbvault/dbvault/internal/adapters/scratch"
 	"github.com/dbvault/dbvault/internal/adapters/source/mysql"
 	"github.com/dbvault/dbvault/internal/adapters/source/postgres"
 	"github.com/dbvault/dbvault/internal/adapters/source/sqlite"
 	"github.com/dbvault/dbvault/internal/adapters/storage/filesystem"
+	"github.com/dbvault/dbvault/internal/adapters/telemetry/prometheus"
 	"github.com/dbvault/dbvault/internal/application/backup"
 	"github.com/dbvault/dbvault/internal/application/controlplane"
 	"github.com/dbvault/dbvault/internal/application/database"
+	"github.com/dbvault/dbvault/internal/application/doctor"
+	"github.com/dbvault/dbvault/internal/application/garbagecollection"
 	"github.com/dbvault/dbvault/internal/application/productexperience"
 	"github.com/dbvault/dbvault/internal/application/scheduler"
 	"github.com/dbvault/dbvault/internal/bootstrap"
@@ -79,7 +84,7 @@ func main() {
 	case "restore-run":
 		restoreRun(os.Args[2:])
 	case "doctor":
-		doctor(os.Args[2:])
+		doctorCmd(os.Args[2:])
 	case "protection":
 		protectionCmd(os.Args[2:])
 	case "bundle":
@@ -435,21 +440,41 @@ func restoreRun(args []string) {
 	}
 	fmt.Println("restore completed:", *target)
 }
-func doctor(args []string) {
+func doctorCmd(args []string) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	cfgPath := fs.String("config", "", "config path")
+	cfgPath := fs.String("config", "", "config path (required)")
 	_ = fs.Parse(args)
 	if *cfgPath == "" {
-		fmt.Println("dbvault doctor: dependency-free Phase 2 build OK. Native SQLite and real S3 require production build tags/dependencies.")
-		return
+		fmt.Fprintln(os.Stderr, "dbvault doctor: --config is required")
+		os.Exit(2)
 	}
-	app, err := loadApp(*cfgPath)
+	report, err := doctorRun(context.Background(), *cfgPath)
 	if err != nil {
-		fmt.Println("doctor failed:", err)
+		fmt.Fprintln(os.Stderr, "doctor failed:", err)
 		os.Exit(1)
 	}
-	defer app.Close(context.Background())
+	for _, c := range report.Checks {
+		marker := "ok  "
+		if !c.OK() {
+			marker = "FAIL"
+		}
+		fmt.Printf("%s\t%s\t%s\n", marker, c.Name, c.Detail)
+	}
+	if !report.Healthy() {
+		failed := 0
+		for _, c := range report.Checks {
+			if !c.OK() {
+				failed++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "doctor: %d check(s) failed\n", failed)
+		os.Exit(1)
+	}
 	fmt.Println("doctor OK")
+}
+
+func doctorRun(ctx context.Context, configPath string) (doctor.Report, error) {
+	return doctor.Run(ctx, configPath, slog.Default())
 }
 
 func engineCmd(args []string) {
@@ -825,6 +850,8 @@ func serverCmd(args []string) {
 
 	var cfg config.Config
 	allowReveal := false
+	var metrics *prometheus.Metrics
+	metricsPath := ""
 	if *cfgPath != "" {
 		loaded, err := config.Load(*cfgPath)
 		if err != nil {
@@ -840,9 +867,16 @@ func serverCmd(args []string) {
 			*dataDir = cfg.Server.DataDirectory
 		}
 		allowReveal = cfg.Security.AllowMasterKeyReveal
+		if cfg.Metrics.Enabled {
+			metrics = prometheus.New()
+			metricsPath = cfg.Metrics.Path
+			if metricsPath == "" {
+				metricsPath = "/metrics"
+			}
+		}
 	}
 	api := controllerapi.New(controlplane.NewStore(), *token).Handler()
-	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev", Demo: *demo, AllowMasterKeyReveal: allowReveal}, api, slog.Default())
+	appliance, err := dbvserver.New(dbvserver.Config{Listen: *listen, PublicURL: *publicURL, DataDirectory: *dataDir, SetupTokenPath: *setupToken, Version: "phase8-dev", Demo: *demo, AllowMasterKeyReveal: allowReveal, MetricsPath: metricsPath, MetricsHandler: metricsHandlerOrNil(metrics)}, api, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -853,7 +887,7 @@ func serverCmd(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo)
+	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo, metrics)
 	defer stopJobs()
 
 	if appDbURL != "" {
@@ -875,8 +909,10 @@ func serverCmd(args []string) {
 
 // startJobRuntime wires the durable queue, scheduler and worker pool behind
 // --config when schedules resolve. Demo mode (and the no-config path) keep
-// their simulated data flow untouched.
-func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, enabled bool) (stop func()) {
+// their simulated data flow untouched. When metrics is non-nil the runtime
+// records job outcomes, durations, bytes backed up, queue depth and
+// lease-expiry events into it.
+func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, enabled bool, metrics *prometheus.Metrics) (stop func()) {
 	noop := func() {}
 	if !enabled {
 		return noop
@@ -896,7 +932,18 @@ func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, ena
 		fmt.Fprintln(os.Stderr, "scheduler bootstrap failed:", err)
 		os.Exit(1)
 	}
+	gcSvc := &garbagecollection.Service{Catalogue: app.Catalogue, Store: app.ObjectStore, Clock: ports.SystemClock{}}
 	executor := scheduler.ExecutorFunc(func(ctx context.Context, job domain.Job) ([]byte, error) {
+		if job.Type == domain.JobGarbageCollection {
+			plan, err := gcSvc.Plan(ctx, domain.RepositoryID(job.ResourceID))
+			if err != nil {
+				return nil, err
+			}
+			if err := gcSvc.Run(ctx, plan); err != nil {
+				return nil, err
+			}
+			return json.Marshal(map[string]any{"plan_id": plan.ID, "reclaimable_bytes": plan.ReclaimableBytes, "deleted": len(plan.DeleteKeys)})
+		}
 		src, err := scheduledSource(app, job.ResourceID)
 		if err != nil {
 			return nil, err
@@ -909,27 +956,165 @@ func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, ena
 		if res.Snapshot != nil {
 			snapshotID = string(res.Snapshot.ID)
 		}
-		return json.Marshal(map[string]any{"run_id": res.Run.ID, "snapshot_id": snapshotID, "duplicate": res.Duplicate})
+		return json.Marshal(map[string]any{"run_id": res.Run.ID, "snapshot_id": snapshotID, "duplicate": res.Duplicate, "bytes_source": res.Run.SourceSize, "bytes_stored": res.Run.UniqueBytes})
 	})
-	sched := scheduler.New(scheduler.Options{Queue: q, Specs: specs, Tick: time.Second, Logger: logger})
+
+	var jobHooks scheduler.Hooks
+	jobHooks.Add(gcTrigger(ctx, cfg, q).AfterJob)
+
+	var notifier *webhook.Notifier
+	if cfg.Notifications.Webhook.Enabled && cfg.Notifications.Webhook.URL.Literal != "" {
+		notifier = webhook.New(cfg.Notifications.Webhook.URL.Literal, cfg.Notifications.Webhook.SigningSecret.Literal)
+		jobHooks.Add(webhookHook(notifier))
+	}
+
+	sched := scheduler.New(scheduler.Options{Queue: q, Specs: specs, Tick: time.Second, Logger: logger,
+		OnRecoverExpired: func(count int) {
+			if metrics != nil {
+				metrics.AddCounter("dbvault_lease_expired_events_total", nil, float64(count))
+			}
+		}})
 	workers := cfg.Schedule.Workers
 	if workers <= 0 {
 		workers = 1
 	}
-	pool := scheduler.NewWorkerPool(scheduler.WorkerOptions{Queue: q, Executor: executor, Workers: workers, Logger: logger, OnSettled: func(job domain.Job, _ error) { sched.Settle(job) }})
+	pool := scheduler.NewWorkerPool(scheduler.WorkerOptions{Queue: q, Executor: executor, Workers: workers, Logger: logger,
+		Types: []domain.JobType{domain.JobBackup, domain.JobGarbageCollection},
+		OnSettled: func(job domain.Job, execErr error, result []byte) {
+			sched.Settle(job)
+			recordJobMetrics(metrics, job, execErr, result)
+			jobHooks.Run(context.Background(), logger, job, execErr)
+		}})
+
+	if metrics != nil {
+		stopDepthGauge := queueDepthGauge(ctx, q, metrics)
+		defer stopDepthGauge()
+	}
+
 	schedDone := make(chan struct{})
 	go func() {
 		defer close(schedDone)
 		sched.Run(ctx)
 	}()
 	pool.Start(ctx)
-	logger.Info("backup scheduler started", "schedules", len(specs), "workers", workers)
+	logger.Info("backup scheduler started", "schedules", len(specs), "workers", workers, "gc_hook", true, "webhook", notifier != nil)
 	return func() {
 		<-schedDone
 		pool.Wait()
 		_ = q.Close()
 		_ = app.Close(context.Background())
 	}
+}
+
+// gcTrigger builds the post-backup GC hook from retention.gc_sweep_interval.
+func gcTrigger(ctx context.Context, cfg config.Config, q ports.JobQueue) *scheduler.GCTrigger {
+	repositoryID := cfg.Repository.ID
+	sweepRaw := cfg.Repository.Retention.GCSweepInterval
+	if len(cfg.Repositories) > 0 {
+		repositoryID = cfg.Repositories[0].ID
+		if v := cfg.Repositories[0].Retention.GCSweepInterval; v != "" {
+			sweepRaw = v
+		}
+	}
+	interval := time.Duration(0)
+	if sweepRaw != "" {
+		d, err := time.ParseDuration(sweepRaw)
+		switch {
+		case err != nil:
+			slog.Warn("invalid repository.retention.gc_sweep_interval; periodic sweep disabled", "value", sweepRaw, "error", err)
+		case d > 0:
+			interval = d
+		}
+	}
+	gc := &scheduler.GCTrigger{Queue: q, Repository: repositoryID, Interval: interval}
+	if interval > 0 {
+		go gc.SweepLoop(ctx, slog.Default())
+	}
+	return gc
+}
+
+// webhookHook adapts the webhook notifier to the post-job hook signature.
+// Delivery failures are logged, never fatal to job settlement.
+func webhookHook(n *webhook.Notifier) scheduler.Hook {
+	return func(ctx context.Context, job domain.Job, execErr error) {
+		event := ports.Event{
+			ID:        string(job.ID),
+			Type:      string(job.Type),
+			Resource:  job.ResourceID,
+			CreatedAt: time.Now().UTC(),
+			Metadata:  map[string]string{"status": "failed"},
+		}
+		if execErr == nil {
+			event.Metadata["status"] = "succeeded"
+			if job.Type != domain.JobBackup {
+				return // notify only backup outcomes for now; GC noise stays local
+			}
+		}
+		event.Severity = "info"
+		if execErr != nil {
+			event.Severity = "warning"
+			event.Metadata["error"] = execErr.Error()
+		}
+		if err := n.Notify(ctx, event); err != nil {
+			slog.Warn("webhook notification not delivered", "job_id", job.ID, "error", err)
+		}
+	}
+}
+
+func recordJobMetrics(m *prometheus.Metrics, job domain.Job, execErr error, result []byte) {
+	if m == nil {
+		return
+	}
+	status := "succeeded"
+	if execErr != nil {
+		status = "failed"
+	}
+	m.IncCounter("dbvault_jobs_total", map[string]string{"type": string(job.Type), "status": status})
+	if execErr != nil {
+		return
+	}
+	var payload struct {
+		BytesSource int64 `json:"bytes_source"`
+		BytesStored int64 `json:"bytes_stored"`
+	}
+	_ = json.Unmarshal(result, &payload)
+	m.AddCounter("dbvault_bytes_backed_up_total", map[string]string{"source": job.ResourceID}, float64(payload.BytesSource))
+	m.ObserveDuration("dbvault_job_duration_seconds", time.Since(job.CreatedAt), map[string]string{"type": string(job.Type)})
+}
+
+// queueDepthGauge refreshes the queue-depth gauge every 15s until ctx ends.
+func queueDepthGauge(ctx context.Context, q ports.JobQueue, m *prometheus.Metrics) (stop func()) {
+	dr, ok := q.(ports.QueueDepthReporter)
+	if !ok || m == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	ticker := time.NewTicker(15 * time.Second)
+	go func() {
+		defer close(done)
+		refresh := func() {
+			if d, err := dr.Depth(ctx); err == nil {
+				m.SetGauge("dbvault_queue_depth", float64(d), nil)
+			}
+		}
+		refresh()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				refresh()
+			}
+		}
+	}()
+	return func() { ticker.Stop(); <-done }
+}
+
+func metricsHandlerOrNil(m *prometheus.Metrics) http.Handler {
+	if m == nil {
+		return nil
+	}
+	return m.Handler()
 }
 
 // scheduledSource maps a scheduled job's resource ID onto the configured
