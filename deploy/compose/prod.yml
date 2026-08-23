@@ -1,0 +1,66 @@
+# DBVault production appliance profile.
+#
+# Usage:
+#   cp prod.config.yaml prod.config.yaml.local   # or edit in place
+#   docker compose -f deploy/compose/prod.yml up -d
+#
+# The appliance boots WITHOUT --demo: real scheduler, real auth (setup token
+# bootstrap), real doctor healthcheck. First boot prints a one-time setup
+# token on stdout (`docker compose logs dbvault`) used to create the admin
+# credential. See docs/runbook.md "First-boot setup".
+#
+# Reverse proxy (Caddy, automatic TLS) is gated behind the "proxy" profile:
+#   PROXY_DOMAIN=backup.example.com docker compose -f deploy/compose/prod.yml --profile proxy up -d
+
+services:
+  dbvault:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        RESTRICTED: "true"
+        VERSION: "0.1.0-alpha"
+    image: dbvault:0.1.0-alpha-prod
+    command: ["server", "--config", "/etc/dbvault/dbvault.yaml"]
+    ports:
+      # Bind to loopback by default; expose publicly only behind the proxy
+      # profile or your own TLS terminator.
+      - "${DBVAULT_BIND:-127.0.0.1}:${DBVAULT_PORT:-8080}:8080"
+    volumes:
+      - ./prod.config.yaml:/etc/dbvault/dbvault.yaml:ro
+      # Named volume holds data-dir (catalogue, keys, jobs.db, log spool).
+      - dbvault-data:/var/lib/dbvault
+      # Dedicated named volume for chunk staging scratch.
+      - dbvault-scratch:/var/lib/dbvault/scratch
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dbvault", "doctor", "--config", "/etc/dbvault/dbvault.yaml"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+  # Optional automatic-TLS reverse proxy. Enable with --profile proxy and
+  # PROXY_DOMAIN set to a DNS name resolving to this host. Caddy terminates
+  # TLS and proxies to the appliance; ACL /metrics at this layer (see
+  # docs/runbook.md "Reverse proxy").
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    command: caddy reverse-proxy --from ${PROXY_DOMAIN:-localhost} --to dbvault:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - dbvault
+    restart: unless-stopped
+
+volumes:
+  dbvault-data:
+  dbvault-scratch:
+  caddy-data:
+  caddy-config:

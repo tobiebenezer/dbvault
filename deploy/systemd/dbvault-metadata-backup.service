@@ -1,0 +1,73 @@
+# DBVault metadata self-backup (oneshot).
+#
+# Backs up dbvault's own SQLite metadata catalogue into its own vault using
+# the hardened pipeline (chunked, encrypted, signed) via `dbvault
+# backup-create --config`. The sqlite source driver uses SQLite's online
+# backup API through a read-only connection, so the live catalogue is copied
+# crash-consistently while the appliance keeps running.
+#
+# Companion config /etc/dbvault/metadata-backup.yaml points the first enabled
+# source at the catalogue file and reuses the production vault:
+#
+#   version: 1
+#   server:
+#     data_directory: /var/lib/dbvault
+#     scratch_directory: /var/lib/dbvault/scratch
+#   catalogue:
+#     driver: sqlite
+#     path: /var/lib/dbvault/catalogue/dbvault.sqlite
+#   secret_providers:
+#     - id: local-files
+#       driver: file
+#       file:
+#         root: /var/lib/dbvault/keys
+#   destinations:
+#     - id: prod-local
+#       driver: filesystem
+#       filesystem:
+#         root: /var/lib/dbvault/repository
+#   repositories:
+#     - id: production
+#       mode: single
+#       primary: {destination: prod-local}
+#       encryption: {key_provider: local-files, active_key: master}
+#       signing: {key_provider: local-files, key_id: signing-local}
+#   sources:
+#     - id: metadata-self
+#       engine: sqlite
+#       repository: production
+#       enabled: true
+#       sqlite:
+#         path: /var/lib/dbvault/catalogue/dbvault.sqlite
+#
+# Snapshot rotation is NOT handled here: retention/GC of old metadata
+# snapshots is enforced by the vault's own retention policy (keep_last /
+# daily / weekly / monthly) and the scheduled garbage-collection job.
+#
+# Restore procedure: see docs/runbook.md "Metadata self-backup".
+
+[Unit]
+Description=DBVault metadata self-backup (catalogue snapshot into own vault)
+After=dbvault.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dbvault
+Group=dbvault
+ExecStart=/usr/local/bin/dbvault backup-create --config /etc/dbvault/metadata-backup.yaml
+WorkingDirectory=/var/lib/dbvault
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/dbvault
+
+[Install]
+WantedBy=multi-user.target

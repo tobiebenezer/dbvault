@@ -1,0 +1,16 @@
+# Daily metadata self-backup timer.
+#
+# Persistent=true catches up a missed run after downtime (e.g. host was off
+# at the scheduled time). RandomizedDelaySec spreads load when many hosts
+# back up around midnight.
+
+[Unit]
+Description=DBVault daily metadata self-backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

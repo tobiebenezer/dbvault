@@ -1,0 +1,102 @@
+# DBVault production appliance configuration example.
+# Aligned with the config schema in internal/config/types.go (both build tags).
+#
+# Console/API auth is ALWAYS on in appliance mode: first boot prints a one-time
+# setup token (also written 0600 to <data_directory>/setup-token) which you
+# exchange for the admin credential. There is no auth off-switch.
+#
+# Validate before deploying:
+#   dbvault config validate --config prod.config.yaml
+#   dbvault doctor --config prod.config.yaml
+
+version: 1
+
+server:
+  data_directory: /var/lib/dbvault
+  scratch_directory: /var/lib/dbvault/scratch
+  log_spool_directory: /var/lib/dbvault/log-spool
+  listen: 0.0.0.0:8080
+
+catalogue:
+  driver: sqlite
+  path: /var/lib/dbvault/catalogue/dbvault.sqlite
+
+secret_providers:
+  - id: local-files
+    driver: file
+    file:
+      root: /var/lib/dbvault/keys
+
+metrics:
+  enabled: true
+  path: /metrics
+
+security:
+  # Master-key reveal stays disabled even for authenticated admins.
+  allow_master_key_reveal: false
+
+doctor:
+  min_free_bytes: 1073741824 # 1 GiB scratch floor; doctor fails the container healthcheck below it.
+
+notifications:
+  webhook:
+    # Flip enabled to true once the secret files exist. The URL placeholder
+    # points at a docker/compose secret mounted read-only into the container:
+    #   secrets: [dbvault_webhook_url, dbvault_webhook_signing_secret]
+    enabled: false
+    url:
+      file: /run/secrets/dbvault_webhook_url
+    signing_secret:
+      file: /run/secrets/dbvault_webhook_signing_secret
+
+destinations:
+  - id: prod-local
+    driver: filesystem
+    filesystem:
+      root: /var/lib/dbvault/repository
+
+repositories:
+  - id: production
+    mode: single
+    primary:
+      destination: prod-local
+    encryption:
+      key_provider: local-files
+      active_key: master
+    signing:
+      key_provider: local-files
+      key_id: signing-local
+    compression:
+      algorithm: zstd
+      level: 6
+      minimum_savings_percent: 5
+    chunking:
+      sqlite:
+        strategy: page-aligned
+        target_size: 64KiB
+    retention:
+      keep_last: 10
+      daily: 14
+      weekly: 8
+      monthly: 6
+      minimum_verified_snapshots: 1
+      gc_sweep_interval: 6h
+
+sources:
+  # EXAMPLE source so the appliance boots and schedules resolve out of the box.
+  # Replace with your real databases (postgres/mysql/mariadb engines) via the
+  # console or config before trusting this deployment.
+  - id: example-sqlite
+    engine: sqlite
+    repository: production
+    enabled: true
+    sqlite:
+      path: /var/lib/dbvault/example.db
+
+schedules:
+  - id: nightly-example-backup
+    source: example-sqlite
+    operation: logical_backup
+    cron: "15 2 * * *"
+    timezone: UTC
+    enabled: true
