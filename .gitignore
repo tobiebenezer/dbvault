@@ -14,3 +14,6 @@ dist/
 web/node_modules/
 .opencode/
 scratch/
+
+# web/dist is a go:embed build input - must stay tracked
+!web/dist/
