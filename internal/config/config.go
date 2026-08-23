@@ -133,5 +133,6 @@ func applyLegacy(c *Config, m map[string]string) {
 	setI("schedule.every_seconds", &c.Schedule.EverySeconds)
 	setS("schedule.cron", &c.Schedule.Cron)
 	setS("schedule.timezone", &c.Schedule.Timezone)
+	setI("schedule.workers", &c.Schedule.Workers)
 	setB("security.allow_master_key_reveal", &c.Security.AllowMasterKeyReveal)
 }

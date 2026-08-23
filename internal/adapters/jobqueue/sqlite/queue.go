@@ -1,10 +1,18 @@
-// Package sqlite provides a dependency-free durable-job adapter shape.
-// In restricted builds it is an in-memory queue; production can replace the
-// internals with atomic SQLite leasing without changing application services.
+// Package sqlite provides the durable job queue adapter behind ports.JobQueue.
+//
+// The public API and method signatures are identical in both build variants so
+// application services never change:
+//
+//	restricted build: jobs persist to a single JSON file using the same
+//	  dependency-free atomic-write pattern as the restricted catalogue adapter.
+//	production build: jobs persist to a real SQLite `jobs` table via
+//	  database/sql, mirroring the production catalogue adapter.
+//
+// New() returns a process-local in-memory queue (used by unit tests and demo
+// paths). Open(path) returns the durable queue.
 package sqlite
 
 import (
-	"context"
 	"sort"
 	"sync"
 	"time"
@@ -12,21 +20,30 @@ import (
 	"github.com/dbvault/dbvault/internal/domain"
 )
 
-type Queue struct {
+const defaultMaximumAttempts = 5
+
+// memoryCore holds the leasing decision logic shared by both build variants.
+// All operations expect core.mu to be held by the caller.
+type memoryCore struct {
 	mu   sync.Mutex
 	jobs map[domain.JobID]domain.Job
 }
 
-func New() *Queue { return &Queue{jobs: map[domain.JobID]domain.Job{}} }
+func newMemoryCore() *memoryCore {
+	return &memoryCore{jobs: map[domain.JobID]domain.Job{}}
+}
 
-func (q *Queue) Enqueue(ctx context.Context, job domain.Job) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (c *memoryCore) enqueueLocked(job domain.Job) error {
+	if existing, ok := c.jobs[job.ID]; ok && !existing.Terminal() {
+		// A live (queued/leased/retrying/interrupted) occurrence wins over a
+		// duplicate enqueue so schedule ticks and restarts cannot double-book.
+		return nil
+	}
 	if job.Status == "" {
 		job.Status = domain.JobPending
 	}
 	if job.MaximumAttempts == 0 {
-		job.MaximumAttempts = 5
+		job.MaximumAttempts = defaultMaximumAttempts
 	}
 	if job.AvailableAt.IsZero() {
 		job.AvailableAt = time.Now().UTC()
@@ -35,21 +52,18 @@ func (q *Queue) Enqueue(ctx context.Context, job domain.Job) error {
 		job.CreatedAt = time.Now().UTC()
 	}
 	job.UpdatedAt = time.Now().UTC()
-	q.jobs[job.ID] = job
+	c.jobs[job.ID] = job
 	return nil
 }
 
-func (q *Queue) LeaseNext(ctx context.Context, workerID string, types []domain.JobType, leaseDuration time.Duration) (domain.Job, bool, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	now := time.Now().UTC()
+func (c *memoryCore) leaseNextLocked(workerID string, types []domain.JobType, leaseDuration time.Duration, now time.Time) (domain.Job, bool) {
 	allowed := map[domain.JobType]bool{}
 	for _, t := range types {
 		allowed[t] = true
 	}
 	candidates := []domain.Job{}
-	for _, j := range q.jobs {
-		if j.Terminal() || j.Status == domain.JobCancelled {
+	for _, j := range c.jobs {
+		if j.Terminal() {
 			continue
 		}
 		if len(allowed) > 0 && !allowed[j.Type] {
@@ -64,7 +78,7 @@ func (q *Queue) LeaseNext(ctx context.Context, workerID string, types []domain.J
 		candidates = append(candidates, j)
 	}
 	if len(candidates) == 0 {
-		return domain.Job{}, false, nil
+		return domain.Job{}, false
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].Priority == candidates[j].Priority {
@@ -78,40 +92,43 @@ func (q *Queue) LeaseNext(ctx context.Context, workerID string, types []domain.J
 	j.LeaseExpiresAt = &exp
 	j.Status = domain.JobLeased
 	j.UpdatedAt = now
-	q.jobs[j.ID] = j
-	return j, true, nil
+	c.jobs[j.ID] = j
+	return j, true
 }
 
-func (q *Queue) Renew(ctx context.Context, jobID domain.JobID, workerID string, leaseDuration time.Duration) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	j := q.jobs[jobID]
+func (c *memoryCore) renewLocked(jobID domain.JobID, workerID string, leaseDuration time.Duration, now time.Time) error {
+	j, ok := c.jobs[jobID]
+	if !ok {
+		return domain.NewError(domain.ErrJobUnavailable, "job not found", nil)
+	}
 	if j.LeaseOwner != workerID {
 		return domain.NewError(domain.ErrJobUnavailable, "job lease owner mismatch", nil)
 	}
-	exp := time.Now().UTC().Add(leaseDuration)
+	exp := now.Add(leaseDuration)
 	j.LeaseExpiresAt = &exp
-	j.UpdatedAt = time.Now().UTC()
-	q.jobs[jobID] = j
+	j.UpdatedAt = now
+	c.jobs[jobID] = j
 	return nil
 }
-func (q *Queue) Complete(ctx context.Context, jobID domain.JobID, resultJSON []byte) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	j := q.jobs[jobID]
-	now := time.Now().UTC()
+
+func (c *memoryCore) completeLocked(jobID domain.JobID, resultJSON []byte, now time.Time) error {
+	j, ok := c.jobs[jobID]
+	if !ok {
+		return domain.NewError(domain.ErrJobUnavailable, "job not found", nil)
+	}
 	j.Status = domain.JobSucceeded
 	j.ResultJSON = resultJSON
 	j.CompletedAt = &now
 	j.UpdatedAt = now
-	q.jobs[jobID] = j
+	c.jobs[jobID] = j
 	return nil
 }
-func (q *Queue) Fail(ctx context.Context, jobID domain.JobID, failure domain.JobFailure) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	j := q.jobs[jobID]
-	now := time.Now().UTC()
+
+func (c *memoryCore) failLocked(jobID domain.JobID, failure domain.JobFailure, now time.Time) error {
+	j, ok := c.jobs[jobID]
+	if !ok {
+		return domain.NewError(domain.ErrJobUnavailable, "job not found", nil)
+	}
 	j.Attempt++
 	j.LastErrorCode = string(failure.Code)
 	j.LastError = failure.Message
@@ -126,34 +143,34 @@ func (q *Queue) Fail(ctx context.Context, jobID domain.JobID, failure domain.Job
 		j.Status = domain.JobFailed
 		j.CompletedAt = &now
 	}
-	q.jobs[jobID] = j
+	c.jobs[jobID] = j
 	return nil
 }
-func (q *Queue) Cancel(ctx context.Context, jobID domain.JobID) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	j := q.jobs[jobID]
-	now := time.Now().UTC()
+
+func (c *memoryCore) cancelLocked(jobID domain.JobID, now time.Time) error {
+	j, ok := c.jobs[jobID]
+	if !ok {
+		return domain.NewError(domain.ErrJobUnavailable, "job not found", nil)
+	}
 	j.Status = domain.JobCancelled
 	j.CompletedAt = &now
 	j.UpdatedAt = now
-	q.jobs[jobID] = j
+	c.jobs[jobID] = j
 	return nil
 }
-func (q *Queue) RecoverExpired(ctx context.Context, now time.Time) ([]domain.JobID, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+
+func (c *memoryCore) recoverExpiredLocked(now time.Time) []domain.JobID {
 	out := []domain.JobID{}
-	for id, j := range q.jobs {
+	for id, j := range c.jobs {
 		if j.LeaseExpiresAt != nil && j.LeaseExpiresAt.Before(now) && !j.Terminal() {
 			j.Status = domain.JobInterrupted
 			j.LeaseOwner = ""
 			j.LeaseExpiresAt = nil
 			j.AvailableAt = now
 			j.UpdatedAt = now
-			q.jobs[id] = j
+			c.jobs[id] = j
 			out = append(out, id)
 		}
 	}
-	return out, nil
+	return out
 }

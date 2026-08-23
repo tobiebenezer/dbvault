@@ -23,6 +23,7 @@ import (
 	gzipc "github.com/dbvault/dbvault/internal/adapters/compression/gzip"
 	"github.com/dbvault/dbvault/internal/adapters/encryption/aead"
 	"github.com/dbvault/dbvault/internal/adapters/id"
+	jobqueue "github.com/dbvault/dbvault/internal/adapters/jobqueue/sqlite"
 	ms "github.com/dbvault/dbvault/internal/adapters/manifest"
 	"github.com/dbvault/dbvault/internal/adapters/scratch"
 	"github.com/dbvault/dbvault/internal/adapters/source/mysql"
@@ -33,6 +34,7 @@ import (
 	"github.com/dbvault/dbvault/internal/application/controlplane"
 	"github.com/dbvault/dbvault/internal/application/database"
 	"github.com/dbvault/dbvault/internal/application/productexperience"
+	"github.com/dbvault/dbvault/internal/application/scheduler"
 	"github.com/dbvault/dbvault/internal/bootstrap"
 	"github.com/dbvault/dbvault/internal/config"
 	"github.com/dbvault/dbvault/internal/domain"
@@ -821,13 +823,15 @@ func serverCmd(args []string) {
 		}
 	}
 
+	var cfg config.Config
 	allowReveal := false
 	if *cfgPath != "" {
-		cfg, err := config.Load(*cfgPath)
+		loaded, err := config.Load(*cfgPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "config error:", err)
 			os.Exit(1)
 		}
+		cfg = loaded
 		cfg.Normalize()
 		if *listen == "" {
 			*listen = cfg.Server.Listen
@@ -849,6 +853,9 @@ func serverCmd(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo)
+	defer stopJobs()
+
 	if appDbURL != "" {
 		fmt.Println("DBVault App System Database (env):", appDbURL)
 	} else {
@@ -864,6 +871,79 @@ func serverCmd(args []string) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// startJobRuntime wires the durable queue, scheduler and worker pool behind
+// --config when schedules resolve. Demo mode (and the no-config path) keep
+// their simulated data flow untouched.
+func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, enabled bool) (stop func()) {
+	noop := func() {}
+	if !enabled {
+		return noop
+	}
+	specs := scheduler.SpecsFromConfig(cfg)
+	if len(specs) == 0 {
+		return noop
+	}
+	logger := slog.Default()
+	q, err := jobqueue.Open(filepath.Join(dataDir, "jobs.db"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "job queue open failed:", err)
+		os.Exit(1)
+	}
+	app, err := bootstrap.Build(ctx, cfg, logger)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "scheduler bootstrap failed:", err)
+		os.Exit(1)
+	}
+	executor := scheduler.ExecutorFunc(func(ctx context.Context, job domain.Job) ([]byte, error) {
+		src, err := scheduledSource(app, job.ResourceID)
+		if err != nil {
+			return nil, err
+		}
+		res, err := app.Backup.Create(ctx, backup.Command{Source: src, Trigger: domain.TriggerSchedule})
+		if err != nil {
+			return nil, err
+		}
+		snapshotID := ""
+		if res.Snapshot != nil {
+			snapshotID = string(res.Snapshot.ID)
+		}
+		return json.Marshal(map[string]any{"run_id": res.Run.ID, "snapshot_id": snapshotID, "duplicate": res.Duplicate})
+	})
+	sched := scheduler.New(scheduler.Options{Queue: q, Specs: specs, Tick: time.Second, Logger: logger})
+	workers := cfg.Schedule.Workers
+	if workers <= 0 {
+		workers = 1
+	}
+	pool := scheduler.NewWorkerPool(scheduler.WorkerOptions{Queue: q, Executor: executor, Workers: workers, Logger: logger, OnSettled: func(job domain.Job, _ error) { sched.Settle(job) }})
+	schedDone := make(chan struct{})
+	go func() {
+		defer close(schedDone)
+		sched.Run(ctx)
+	}()
+	pool.Start(ctx)
+	logger.Info("backup scheduler started", "schedules", len(specs), "workers", workers)
+	return func() {
+		<-schedDone
+		pool.Wait()
+		_ = q.Close()
+		_ = app.Close(context.Background())
+	}
+}
+
+// scheduledSource maps a scheduled job's resource ID onto the configured
+// source. Only SQLite sources are executable by the built-in runtime; anything
+// else fails the job with a clear reason instead of a driver-layer surprise.
+func scheduledSource(app *bootstrap.Application, resourceID string) (domain.Source, error) {
+	sc, ok := config.SourceByID(app.Config, resourceID)
+	if !ok {
+		return domain.Source{}, fmt.Errorf("source %q is not configured for scheduled backups", resourceID)
+	}
+	if sc.SQLite == nil {
+		return domain.Source{}, fmt.Errorf("source %q uses engine %q; scheduled execution currently supports sqlite sources only", sc.ID, sc.Engine)
+	}
+	return domain.Source{ID: domain.SourceID(sc.ID), Name: sc.ID, Driver: "sqlite", Enabled: sc.IsEnabled(), Path: sc.SQLite.Path, RepositoryID: domain.RepositoryID(sc.Repository)}, nil
 }
 
 func installCmd(args []string) {

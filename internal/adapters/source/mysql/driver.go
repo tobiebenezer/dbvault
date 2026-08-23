@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,12 @@ func (d *Driver) ValidateSource(ctx context.Context, source domain.Source) error
 	}
 	if d.Config.Username == "" {
 		return domain.NewError(domain.ErrConfigurationInvalid, "mysql username is required", nil)
+	}
+	if d.Config.Socket == "" && d.Config.Password.File == "" && d.Config.Password.Env == "" {
+		return domain.NewError(domain.ErrConfigurationInvalid, "mysql password secret reference (file or env) is required unless socket auth is configured", nil)
+	}
+	if _, err := d.password(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -202,7 +209,41 @@ func (d *Driver) dumpArgs() []string {
 	return args
 }
 func (d *Driver) env() []ports.EnvironmentVariable {
-	return []ports.EnvironmentVariable{{Name: "MYSQL_PWD", Value: "", Sensitive: true}}
+	pwd, err := d.password()
+	if err != nil {
+		// Callers treat env() as best-effort assembly; ValidateSource is the
+		// loud gate. Never emit a silent empty MYSQL_PWD over TCP, though:
+		// an unresolvable reference yields no credential variable at all.
+		return nil
+	}
+	if pwd == "" {
+		return nil
+	}
+	return []ports.EnvironmentVariable{{Name: "MYSQL_PWD", Value: pwd, Sensitive: true}}
+}
+
+// password resolves Config.Password through the same config secret-reference
+// semantics used across the repo (file contents or named environment
+// variable); the process environment is only consulted when the reference
+// explicitly names a variable.
+func (d *Driver) password() (string, error) {
+	r := d.Config.Password
+	switch {
+	case r.File != "":
+		b, err := os.ReadFile(r.File)
+		if err != nil {
+			return "", domain.NewError(domain.ErrConfigurationInvalid, "mysql password file unreadable", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	case r.Env != "":
+		v, ok := os.LookupEnv(r.Env)
+		if !ok {
+			return "", domain.NewError(domain.ErrConfigurationInvalid, "mysql password environment secret "+r.Env+" is not set", nil)
+		}
+		return strings.TrimSpace(v), nil
+	default:
+		return "", nil
+	}
 }
 func (d *Driver) version(ctx context.Context, exe string) (domain.Version, error) {
 	var out strings.Builder

@@ -1733,19 +1733,22 @@ func Run(ctx context.Context, appliance *Appliance) error {
 	go func() { errc <- server.ListenAndServe() }()
 	appliance.SetReady(true)
 
-	// Background worker advancement loop
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				appliance.px.GenerateDemoProgress()
+	// Demo simulation loop: only under --demo. Real deployments progress
+	// jobs through the durable queue and worker pool instead.
+	if appliance.cfg.Demo {
+		go func() {
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					appliance.px.GenerateDemoProgress()
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	select {
 	case <-ctx.Done():

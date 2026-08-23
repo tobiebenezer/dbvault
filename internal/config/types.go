@@ -216,6 +216,17 @@ type SourceConfig struct {
 
 func (s SourceConfig) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
+// SourceByID returns the configured source with the given ID; an empty ID
+// matches the first configured source.
+func SourceByID(c Config, id string) (SourceConfig, bool) {
+	for i := range c.Sources {
+		if id == "" || c.Sources[i].ID == id {
+			return c.Sources[i], true
+		}
+	}
+	return SourceConfig{}, false
+}
+
 type SQLiteSourceConfig struct {
 	Path         string `json:"path" yaml:"path"`
 	BusyTimeout  string `json:"busy_timeout,omitempty" yaml:"busy_timeout,omitempty"`
@@ -357,9 +368,11 @@ type Keys struct {
 	Directory string `json:"directory" yaml:"directory"`
 }
 type Schedule struct {
-	Cron, Timezone string
-	Enabled        bool
-	EverySeconds   int
+	Cron         string `json:"cron,omitempty" yaml:"cron,omitempty"`
+	Timezone     string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	Enabled      bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	EverySeconds int    `json:"every_seconds,omitempty" yaml:"every_seconds,omitempty"`
+	Workers      int    `json:"workers,omitempty" yaml:"workers,omitempty"`
 }
 
 type RuntimeBinding struct {
