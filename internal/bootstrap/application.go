@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	catsqlite "github.com/dbvault/dbvault/internal/adapters/catalogue/sqlite"
 	zstdc "github.com/dbvault/dbvault/internal/adapters/compression/zstd"
 	"github.com/dbvault/dbvault/internal/adapters/encryption/aead"
 	"github.com/dbvault/dbvault/internal/adapters/id"
+	filekeys "github.com/dbvault/dbvault/internal/adapters/keys/file"
 	"github.com/dbvault/dbvault/internal/adapters/manifest/ed25519"
 	"github.com/dbvault/dbvault/internal/adapters/scratch"
 	"github.com/dbvault/dbvault/internal/adapters/storage/filesystem"
@@ -62,7 +64,7 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applic
 		_ = cat.Close()
 		return nil, err
 	}
-	signer, err := ed25519.Generate(firstNonEmpty(binding.Repository.Signing.KeyID, "restricted-signing"))
+	signer, err := restrictedSigner(cfg, binding.Repository)
 	if err != nil {
 		_ = cat.Close()
 		return nil, err
@@ -87,6 +89,28 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applic
 	bsvc := &backup.Service{Catalogue: cat, Source: srcDriver, Store: store, Scratch: scratch.New(cfg.Server.ScratchDirectory), Compressor: comp, Encryptor: enc, Signer: signer, Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: key[:], Repository: repo, TargetChunkBytes: chunkBytes}
 	rsvc := &restore.Service{Catalogue: cat, Store: store, Compressor: comp, Encryptor: enc, Signer: signer}
 	return &Application{Config: cfg, Binding: binding, Catalogue: cat, ObjectStore: store, Backup: bsvc, Restore: rsvc, Close: func(context.Context) error { return cat.Close() }}, nil
+}
+
+// restrictedSigner loads the repository signing pair from <data-dir>/keys,
+// creating and persisting it on first use, so manifests signed by one process
+// verify in another instead of failing with "invalid manifest signature".
+func restrictedSigner(cfg config.Config, r config.RepositoryConfig) (ed25519.Signer, error) {
+	keyDir := filepath.Join(cfg.Server.DataDirectory, "keys")
+	keys := filekeys.New(keyDir)
+	pair, err := keys.Signing(r.ID)
+	if err != nil {
+		if mkErr := os.MkdirAll(keyDir, 0700); mkErr != nil {
+			return ed25519.Signer{}, mkErr
+		}
+		if genErr := keys.Generate(r.ID, firstNonEmpty(r.Encryption.ActiveKey, "master")); genErr != nil {
+			return ed25519.Signer{}, genErr
+		}
+		pair, err = keys.Signing(r.ID)
+		if err != nil {
+			return ed25519.Signer{}, err
+		}
+	}
+	return ed25519.New(firstNonEmpty(r.Signing.KeyID, "restricted-signing"), pair.Private, pair.Public), nil
 }
 
 func buildRestrictedStore(d config.DestinationConfig) (ports.ObjectStore, error) {
