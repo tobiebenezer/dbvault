@@ -15,7 +15,6 @@ import (
 	"github.com/dbvault/dbvault/internal/adapters/id"
 	"github.com/dbvault/dbvault/internal/adapters/manifest/ed25519"
 	"github.com/dbvault/dbvault/internal/adapters/scratch"
-	srcsqlite "github.com/dbvault/dbvault/internal/adapters/source/sqlite"
 	"github.com/dbvault/dbvault/internal/adapters/storage/filesystem"
 	"github.com/dbvault/dbvault/internal/adapters/storage/s3"
 	"github.com/dbvault/dbvault/internal/application/backup"
@@ -77,14 +76,15 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applic
 		_ = cat.Close()
 		return nil, err
 	}
-	if binding.Source.Engine != "sqlite" || binding.Source.SQLite == nil {
+	srcDriver, err := buildSourceDriver(binding.Source)
+	if err != nil {
 		_ = cat.Close()
-		return nil, fmt.Errorf("restricted standalone runtime currently executes SQLite sources; selected source %s uses %s", binding.Source.ID, binding.Source.Engine)
+		return nil, err
 	}
 	repo := buildRepository(binding.Repository, binding.Primary.ID)
 	chunkBytes, _ := config.ParseBytes(binding.Repository.Chunking.SQLite.TargetSize)
 	comp := zstdc.New(binding.Repository.Compression.Level, binding.Repository.Compression.MinimumSavingsPercent)
-	bsvc := &backup.Service{Catalogue: cat, Source: srcsqlite.New("sqlite3"), Store: store, Scratch: scratch.New(cfg.Server.ScratchDirectory), Compressor: comp, Encryptor: enc, Signer: signer, Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: key[:], Repository: repo, TargetChunkBytes: chunkBytes}
+	bsvc := &backup.Service{Catalogue: cat, Source: srcDriver, Store: store, Scratch: scratch.New(cfg.Server.ScratchDirectory), Compressor: comp, Encryptor: enc, Signer: signer, Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: key[:], Repository: repo, TargetChunkBytes: chunkBytes}
 	rsvc := &restore.Service{Catalogue: cat, Store: store, Compressor: comp, Encryptor: enc, Signer: signer}
 	return &Application{Config: cfg, Binding: binding, Catalogue: cat, ObjectStore: store, Backup: bsvc, Restore: rsvc, Close: func(context.Context) error { return cat.Close() }}, nil
 }

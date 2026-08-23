@@ -48,6 +48,14 @@ type Result struct {
 
 func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 	now := s.Clock.Now()
+	engine := strings.ToLower(cmd.Source.Driver)
+	if engine == "" {
+		engine = "sqlite"
+	}
+	snapshotMode := domain.SQLiteSnapshotMode(domain.BackupModeLogical)
+	if engine == "sqlite" {
+		snapshotMode = domain.SQLiteSnapshotOnlineBackup
+	}
 	runID := domain.BackupRunID(s.IDs.NewID("run"))
 	run := domain.BackupRun{ID: runID, SourceID: cmd.Source.ID, RepositoryID: s.Repository.ID, Trigger: cmd.Trigger, Status: domain.RunSnapshotting, StartedAt: now}
 	_ = s.Catalogue.CreateBackupRun(ctx, run)
@@ -56,7 +64,7 @@ func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 		return s.fail(ctx, run, domain.ErrScratchInsufficient, err)
 	}
 	defer reservation.Release()
-	art, err := s.Source.CreateSnapshot(ctx, ports.SnapshotRequest{RunID: runID, Source: cmd.Source, ScratchDirectory: reservation.Dir, Mode: domain.SQLiteSnapshotOnlineBackup})
+	art, err := s.Source.CreateSnapshot(ctx, ports.SnapshotRequest{RunID: runID, Source: cmd.Source, ScratchDirectory: reservation.Dir, Mode: snapshotMode})
 	if err != nil {
 		return s.fail(ctx, run, domain.ErrSnapshotFailed, err)
 	}
@@ -120,7 +128,7 @@ func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 		chunkRecords = append(chunkRecords, domain.Chunk{ID: domain.ChunkID(chunkID), RepositoryID: s.Repository.ID, KeyVersion: s.Repository.Encryption.KeyID, Compression: s.Compressor.Name(), PlaintextSize: ch.PlaintextSize, ObjectKey: key, CreatedAt: now})
 		manifestChunks = append(manifestChunks, mf.ChunkInfo{Sequence: ch.Sequence, ChunkID: chunkID, ObjectKey: key, PageStart: ch.PageStart, PageCount: ch.PageCount, PlaintextSize: ch.PlaintextSize, Compression: s.Compressor.Name(), KeyID: s.Repository.Encryption.KeyID})
 	}
-	manifest := mf.SnapshotManifest{Format: "dbvault-snapshot", FormatVersion: 1, RepositoryID: string(s.Repository.ID), SnapshotID: string(snapID), SourceID: string(cmd.Source.ID), Database: mf.DatabaseInfo{Engine: "sqlite", SQLiteVersion: meta.EngineVersion, PageSize: meta.PageSize, PageCount: meta.PageCount, LogicalSize: art.Size(), SchemaDigest: meta.SchemaDigest}, Snapshot: mf.SnapshotInfo{Mode: string(domain.SQLiteSnapshotOnlineBackup), CreatedAt: now.Format("2006-01-02T15:04:05.999999999Z07:00"), RootDigest: root, Chunking: map[string]any{"strategy": "sqlite-pages-v1", "target_size": target}}, Chunks: manifestChunks}
+	manifest := mf.SnapshotManifest{Format: "dbvault-snapshot", FormatVersion: 1, RepositoryID: string(s.Repository.ID), SnapshotID: string(snapID), SourceID: string(cmd.Source.ID), Database: mf.DatabaseInfo{Engine: engine, SQLiteVersion: meta.EngineVersion, PageSize: meta.PageSize, PageCount: meta.PageCount, LogicalSize: art.Size(), SchemaDigest: meta.SchemaDigest}, Snapshot: mf.SnapshotInfo{Mode: string(snapshotMode), CreatedAt: now.Format("2006-01-02T15:04:05.999999999Z07:00"), RootDigest: root, Chunking: map[string]any{"strategy": "sqlite-pages-v1", "target_size": target}}, Chunks: manifestChunks}
 	payload, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return s.fail(ctx, run, domain.ErrManifestInvalid, err)
@@ -145,7 +153,7 @@ func (s *Service) Create(ctx context.Context, cmd Command) (Result, error) {
 		return s.fail(ctx, run, domain.ErrStorageUnavailable, err)
 	}
 	committed := s.Clock.Now()
-	snap := domain.Snapshot{ID: snapID, SourceID: cmd.Source.ID, RepositoryID: s.Repository.ID, Status: domain.SnapshotCommitted, SnapshotMode: domain.SQLiteSnapshotOnlineBackup, DatabaseSize: art.Size(), PageSize: meta.PageSize, PageCount: meta.PageCount, RootDigest: root, SchemaDigest: meta.SchemaDigest, ChunkCount: len(chunks), UniqueChunkCount: len(chunks), CompressedBytes: compressedBytes, UniqueUploadedBytes: uniqueBytes, CreatedAt: now, CommittedAt: &committed, VerifiedAt: &committed, ManifestObjectKey: manifestKey, CompletionObjectKey: completeKey}
+	snap := domain.Snapshot{ID: snapID, SourceID: cmd.Source.ID, RepositoryID: s.Repository.ID, Status: domain.SnapshotCommitted, SnapshotMode: snapshotMode, DatabaseSize: art.Size(), PageSize: meta.PageSize, PageCount: meta.PageCount, RootDigest: root, SchemaDigest: meta.SchemaDigest, ChunkCount: len(chunks), UniqueChunkCount: len(chunks), CompressedBytes: compressedBytes, UniqueUploadedBytes: uniqueBytes, CreatedAt: now, CommittedAt: &committed, VerifiedAt: &committed, ManifestObjectKey: manifestKey, CompletionObjectKey: completeKey}
 	if err := s.Catalogue.CreateSnapshot(ctx, snap, snapChunks, chunkRecords); err != nil {
 		return s.fail(ctx, run, domain.ErrManifestInvalid, err)
 	}

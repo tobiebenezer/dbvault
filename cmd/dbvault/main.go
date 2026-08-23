@@ -608,10 +608,14 @@ func mysqlRecoveryCmd(args []string) {
 
 func domainSource(binding config.RuntimeBinding) (domain.Source, error) {
 	source := binding.Source
-	if source.Engine != "sqlite" || source.SQLite == nil {
-		return domain.Source{}, fmt.Errorf("source %s uses %s; this standalone backup command currently executes SQLite while native database jobs use the driver platform", source.ID, source.Engine)
+	switch {
+	case source.Engine == "sqlite" && source.SQLite != nil:
+		return domain.Source{ID: domain.SourceID(source.ID), Name: source.ID, Driver: "sqlite", Enabled: source.IsEnabled(), Path: source.SQLite.Path, RepositoryID: domain.RepositoryID(source.Repository)}, nil
+	case (source.Engine == "mysql" || source.Engine == "mariadb") && source.MySQL != nil:
+		return domain.Source{ID: domain.SourceID(source.ID), Name: source.ID, Driver: source.Engine, Enabled: source.IsEnabled(), RepositoryID: domain.RepositoryID(source.Repository)}, nil
+	default:
+		return domain.Source{}, fmt.Errorf("source %s uses %s; this standalone backup command currently executes sqlite and mysql/mariadb sources", source.ID, source.Engine)
 	}
-	return domain.Source{ID: domain.SourceID(source.ID), Name: source.ID, Driver: source.Engine, Enabled: source.IsEnabled(), Path: source.SQLite.Path, RepositoryID: domain.RepositoryID(source.Repository)}, nil
 }
 
 func sourceCmd(args []string) {
@@ -1118,17 +1122,26 @@ func metricsHandlerOrNil(m *prometheus.Metrics) http.Handler {
 }
 
 // scheduledSource maps a scheduled job's resource ID onto the configured
-// source. Only SQLite sources are executable by the built-in runtime; anything
-// else fails the job with a clear reason instead of a driver-layer surprise.
+// source. SQLite sources are executable anywhere; MySQL/MariaDB sources must
+// be the source this runtime bound at bootstrap (its dump driver carries that
+// source's connection and secret references). Anything else fails the job
+// with a clear reason instead of a driver-layer surprise.
 func scheduledSource(app *bootstrap.Application, resourceID string) (domain.Source, error) {
 	sc, ok := config.SourceByID(app.Config, resourceID)
 	if !ok {
 		return domain.Source{}, fmt.Errorf("source %q is not configured for scheduled backups", resourceID)
 	}
-	if sc.SQLite == nil {
-		return domain.Source{}, fmt.Errorf("source %q uses engine %q; scheduled execution currently supports sqlite sources only", sc.ID, sc.Engine)
+	switch {
+	case sc.SQLite != nil:
+		return domain.Source{ID: domain.SourceID(sc.ID), Name: sc.ID, Driver: "sqlite", Enabled: sc.IsEnabled(), Path: sc.SQLite.Path, RepositoryID: domain.RepositoryID(sc.Repository)}, nil
+	case (sc.Engine == "mysql" || sc.Engine == "mariadb") && sc.MySQL != nil:
+		if sc.ID != app.Binding.Source.ID {
+			return domain.Source{}, fmt.Errorf("source %q uses engine %q but this runtime bound source %q; run one appliance instance per database source", sc.ID, sc.Engine, app.Binding.Source.ID)
+		}
+		return domain.Source{ID: domain.SourceID(sc.ID), Name: sc.ID, Driver: sc.Engine, Enabled: sc.IsEnabled(), RepositoryID: domain.RepositoryID(sc.Repository)}, nil
+	default:
+		return domain.Source{}, fmt.Errorf("source %q uses engine %q; scheduled execution currently supports sqlite and mysql/mariadb sources", sc.ID, sc.Engine)
 	}
-	return domain.Source{ID: domain.SourceID(sc.ID), Name: sc.ID, Driver: "sqlite", Enabled: sc.IsEnabled(), Path: sc.SQLite.Path, RepositoryID: domain.RepositoryID(sc.Repository)}, nil
 }
 
 func installCmd(args []string) {

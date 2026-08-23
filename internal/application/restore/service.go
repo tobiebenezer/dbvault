@@ -110,8 +110,13 @@ func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target stri
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := validateSQLiteHeader(tmp); err != nil {
-		return err
+	switch man.Database.Engine {
+	case "", "sqlite":
+		// Legacy manifests always recorded engine sqlite; validate the
+		// reconstructed file header for that family only.
+		if err := validateSQLiteHeader(tmp); err != nil {
+			return err
+		}
 	}
 	if replace {
 		if _, err := os.Stat(target); err == nil {
