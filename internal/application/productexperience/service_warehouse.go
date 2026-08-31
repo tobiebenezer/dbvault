@@ -3,8 +3,11 @@ package productexperience
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dbvault/dbvault/internal/adapters/warehouse"
+	"github.com/dbvault/dbvault/internal/config"
 	"github.com/dbvault/dbvault/internal/domain"
 	"github.com/dbvault/dbvault/internal/ports"
 )
@@ -291,6 +295,11 @@ type WarehouseSyncOptions struct {
 	// back to a full refresh and records that fact.
 	Incremental     bool   `json:"incremental,omitempty"`
 	WatermarkColumn string `json:"watermark_column,omitempty"`
+	// ConnectorID routes source extraction through a stored warehouse
+	// connector (host/credentials from the catalogue) instead of the
+	// appliance's ambient source configuration. Required for ClickHouse
+	// targets; there is no default endpoint.
+	ConnectorID string `json:"connector_id,omitempty"`
 }
 
 // SyncWarehouse extracts source tables and writes verified Parquet artifacts,
@@ -300,6 +309,13 @@ type WarehouseSyncOptions struct {
 func (s *Service) SyncWarehouse(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 	if err := s.ValidateWarehouseSync(ctx, databaseID); err != nil {
 		return err
+	}
+	if opts.ConnectorID != "" {
+		// Fail fast on an unknown connector instead of extracting half the
+		// tables before discovering the credentials do not resolve.
+		if _, err := s.resolveWarehouseConnector(ctx, opts.ConnectorID, ""); err != nil {
+			return err
+		}
 	}
 	s.initWarehouse()
 	s.mu.Lock()
@@ -344,7 +360,7 @@ func (s *Service) syncWarehouseTable(ctx context.Context, duckdbPath, databaseID
 		return err
 	}
 	query := buildWarehouseExtractQuery(tableName, mode, watermarkColumn, lastWatermark)
-	result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: databaseID, Query: query})
+	result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: databaseID, Query: query, ConnectorID: opts.ConnectorID})
 	if err != nil {
 		return fmt.Errorf("extract %s.%s: %w", databaseID, tableName, err)
 	}
@@ -794,22 +810,67 @@ func (s *Service) ExecuteWarehouseQuery(ctx context.Context, req warehouse.Query
 
 	// If a specific live target database is requested (e.g. cribx_test), route to live database query runner
 	if req.Database != "" && req.Database != "duckdb" && req.Database != "auto" {
-		return s.executeLiveDBQuery(ctx, req)
+		res, err := s.executeLiveDBQuery(ctx, req)
+		s.auditWarehouseQuery(req, res, err)
+		return res, err
 	}
 
 	// Always ensure default analytical tables (users, transactions, orders, lakehouse_metrics) are populated
 	s.seedDefaultWarehouseTables()
 
 	if req.Engine == "clickhouse" {
-		ch := warehouse.NewClickHouseConnector("http://127.0.0.1:8123", "default", "", "default")
-		res, err := ch.ExecuteQuery(ctx, req.Query)
-		if err == nil {
-			return res, nil
-		}
-		return nil, fmt.Errorf("clickhouse query failed: %w", err)
+		res, err := s.executeClickHouseQuery(ctx, req)
+		s.auditWarehouseQuery(req, res, err)
+		return res, err
 	}
 
-	return s.warehouseEngine.ExecuteQuery(ctx, req)
+	res, err := s.warehouseEngine.ExecuteQuery(ctx, req)
+	s.auditWarehouseQuery(req, res, err)
+	return res, err
+}
+
+// executeClickHouseQuery routes a query to ClickHouse through a stored
+// connector. There is deliberately no default endpoint: without a connector_id
+// the query fails with instructions instead of silently hitting localhost.
+func (s *Service) executeClickHouseQuery(ctx context.Context, req warehouse.QueryRequest) (*warehouse.QueryResult, error) {
+	rc, err := s.resolveWarehouseConnector(ctx, req.ConnectorID, "clickhouse")
+	if err != nil {
+		return nil, err
+	}
+	res, err := warehouse.NewClickHouseConnector(rc.url, rc.username, rc.password, rc.database).ExecuteQuery(ctx, req.Query)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse query failed: %w", err)
+	}
+	return res, nil
+}
+
+// auditWarehouseQuery records one warehouse.query audit event through the
+// established audit chain. Engine, database and row count come from the actual
+// request/result; the masked flag is set by the export path that knows the
+// masking outcome.
+func (s *Service) auditWarehouseQuery(req warehouse.QueryRequest, res *warehouse.QueryResult, err error) {
+	outcome := "succeeded"
+	engine := req.Engine
+	rows := 0
+	if err != nil {
+		outcome = "failed"
+	} else if res != nil {
+		rows = res.RowCount
+		if res.Engine != "" {
+			engine = res.Engine
+		}
+	}
+	if engine == "" {
+		engine = "duckdb_embedded"
+	}
+	meta := map[string]string{"engine": engine, "database": req.Database, "rows": strconv.Itoa(rows)}
+	if req.ConnectorID != "" {
+		meta["connector_id"] = req.ConnectorID
+	}
+	if err != nil {
+		meta["error"] = err.Error()
+	}
+	s.recordWarehouseAudit("warehouse.query", req.Database, outcome, meta)
 }
 
 func (s *Service) databaseHasSyncedWarehouseData(database string) bool {
@@ -876,6 +937,433 @@ func (s *Service) SetWarehouseEvidence(store ports.WarehouseEvidenceStore) {
 	s.warehouseEvidence = store
 }
 
+// SetWarehouseConnectors wires the persistent connector store used to resolve
+// external warehouse endpoints at query and sync time. When it is never
+// called only the embedded engine is available and connector APIs fail closed.
+func (s *Service) SetWarehouseConnectors(store ports.WarehouseConnectorStore) {
+	s.warehouseConnectors = store
+}
+
+// SetSecretResolver wires the function that turns stored secret references
+// into credential material at use-time. The appliance passes the production
+// config resolver; tests may inject their own.
+func (s *Service) SetSecretResolver(fn func(config.SecretReference) (string, error)) {
+	s.secretResolver = fn
+}
+
+// resolvedConnector is one stored connector with its secret material resolved
+// for a single use. The password exists only inside this value: it is never
+// logged, audited, persisted or returned to clients.
+type resolvedConnector struct {
+	record   domain.WarehouseConnectorRecord
+	url      string
+	host     string
+	port     int
+	username string
+	password string
+	database string
+}
+
+// parseConnectorEndpoint splits a connector endpoint into the URL form needed
+// by the ClickHouse HTTP client and the host/port form needed by the psql and
+// mysql CLIs. A scheme is inferred from the kind when omitted.
+func parseConnectorEndpoint(endpoint, kind string) (string, string, int, error) {
+	raw := strings.TrimSpace(endpoint)
+	if raw == "" {
+		return "", "", 0, fmt.Errorf("endpoint is empty")
+	}
+	if !strings.Contains(raw, "://") {
+		if kind == "postgres" {
+			raw = "postgresql://" + raw
+		} else {
+			raw = "http://" + raw
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", 0, err
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", "", 0, fmt.Errorf("endpoint host is missing")
+	}
+	port := 0
+	if p := u.Port(); p != "" {
+		port, err = strconv.Atoi(p)
+		if err != nil || port <= 0 || port > 65535 {
+			return "", "", 0, fmt.Errorf("endpoint port is invalid")
+		}
+	} else {
+		switch kind {
+		case "clickhouse":
+			port = 8123
+		case "postgres":
+			port = 5432
+		case "mysql":
+			port = 3306
+		}
+	}
+	return strings.TrimRight(raw, "/"), host, port, nil
+}
+
+// resolveConnectorSecret turns a stored secret reference into credential
+// material. The injected resolver wins; without one, file, env and literal
+// references still resolve through the config resolver's non-production path.
+func (s *Service) resolveConnectorSecret(ref config.SecretReference) (string, error) {
+	if s.secretResolver != nil {
+		return s.secretResolver(ref)
+	}
+	return config.Config{}.ResolveSecret(ref, false)
+}
+
+// resolveWarehouseConnector loads, validates and unlocks one stored connector.
+// expectedKind pins the engine kind ("clickhouse", "postgres", "mysql"); an
+// empty string accepts any known kind. Unknown IDs and unconfigured stores
+// fail closed: without a real connector there is no query.
+func (s *Service) resolveWarehouseConnector(ctx context.Context, id, expectedKind string) (resolvedConnector, error) {
+	if strings.TrimSpace(id) == "" {
+		return resolvedConnector{}, fmt.Errorf("no warehouse connector specified")
+	}
+	if s.warehouseConnectors == nil {
+		return resolvedConnector{}, fmt.Errorf("warehouse connectors are not configured on this appliance")
+	}
+	rec, ok, err := s.warehouseConnectors.GetWarehouseConnector(ctx, id)
+	if err != nil {
+		return resolvedConnector{}, fmt.Errorf("warehouse connector %q lookup failed: %w", id, err)
+	}
+	if !ok {
+		return resolvedConnector{}, fmt.Errorf("warehouse connector %q not found", id)
+	}
+	kind := strings.ToLower(strings.TrimSpace(rec.Kind))
+	switch kind {
+	case "clickhouse", "postgres", "mysql":
+	default:
+		return resolvedConnector{}, fmt.Errorf("warehouse connector %q has unsupported kind %q", id, rec.Kind)
+	}
+	if expectedKind != "" && kind != expectedKind {
+		return resolvedConnector{}, fmt.Errorf("warehouse connector %q is a %s connector, but a %s connector is required", id, kind, expectedKind)
+	}
+	var secretRef config.SecretReference
+	if strings.TrimSpace(rec.SecretRef) != "" {
+		if err := json.Unmarshal([]byte(rec.SecretRef), &secretRef); err != nil {
+			return resolvedConnector{}, fmt.Errorf("warehouse connector %q has an unreadable secret reference", id)
+		}
+	}
+	password := ""
+	if !secretRef.Empty() {
+		password, err = s.resolveConnectorSecret(secretRef)
+		if err != nil {
+			return resolvedConnector{}, fmt.Errorf("warehouse connector %q secret is unavailable: %w", id, err)
+		}
+	}
+	rawURL, host, port, err := parseConnectorEndpoint(rec.Endpoint, kind)
+	if err != nil {
+		return resolvedConnector{}, fmt.Errorf("warehouse connector %q endpoint is invalid: %w", id, err)
+	}
+	return resolvedConnector{
+		record:   rec,
+		url:      rawURL,
+		host:     host,
+		port:     port,
+		username: rec.Username,
+		password: password,
+		database: rec.Database,
+	}, nil
+}
+
+// recordWarehouseAudit appends one warehouse.* event to the SHA-256 audit
+// chain. Failures are recorded as honestly as successes.
+func (s *Service) recordWarehouseAudit(eventType, resourceID, outcome string, metadata map[string]string) {
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	s.RecordAuditEvent(eventType, "service", "dbvault-appliance", "warehouse", resourceID, outcome, metadata)
+}
+
+// auditWorkerSyncEvent records the outcome of a worker/scheduler-driven sync
+// run, including incremental mode, watermark column and connector id.
+func (s *Service) auditWorkerSyncEvent(eventType, databaseID string, opts WarehouseSyncOptions, outcome string, extra map[string]string) {
+	meta := map[string]string{"mode": "full"}
+	if opts.Incremental {
+		meta["mode"] = "incremental"
+	}
+	if opts.WatermarkColumn != "" {
+		meta["watermark_column"] = opts.WatermarkColumn
+	}
+	if opts.ConnectorID != "" {
+		meta["connector_id"] = opts.ConnectorID
+	}
+	for k, v := range extra {
+		meta[k] = v
+	}
+	s.recordWarehouseAudit(eventType, databaseID, outcome, meta)
+}
+
+// WarehouseConnectorInput is the create/update payload for user-managed
+// warehouse connectors. A password, when supplied, is immediately written to
+// the appliance secrets directory and only its reference is ever stored.
+type WarehouseConnectorInput struct {
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // clickhouse | postgres | mysql
+	Endpoint string `json:"endpoint"`
+	Database string `json:"database"`
+	Username string `json:"username"`
+	Password string `json:"password,omitempty"`
+}
+
+// storeConnectorSecret persists connector credential material under the
+// appliance secrets directory and returns the JSON secret reference to store.
+func (s *Service) storeConnectorSecret(connectorID, password string) (string, error) {
+	if strings.TrimSpace(password) == "" {
+		return "", nil
+	}
+	dir := filepath.Join(s.root, "secrets")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "warehouse-connector-"+connectorID)
+	if err := os.WriteFile(path, []byte(password), 0o600); err != nil {
+		return "", err
+	}
+	ref := config.SecretReference{File: path}
+	b, err := json.Marshal(ref)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// validateConnectorFields enforces the invariants shared by create and update.
+func validateConnectorFields(name, kind, endpoint string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", "", fmt.Errorf("connector name is required")
+	}
+	if len(name) > 120 {
+		return "", "", fmt.Errorf("connector name must be 120 characters or fewer")
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	switch kind {
+	case "clickhouse", "postgres", "mysql":
+	default:
+		return "", "", fmt.Errorf("connector kind must be one of clickhouse, postgres or mysql")
+	}
+	if _, _, _, err := parseConnectorEndpoint(endpoint, kind); err != nil {
+		return "", "", fmt.Errorf("connector endpoint invalid: %w", err)
+	}
+	return name, kind, nil
+}
+
+// connectorView projects a stored record into the API view. Secret material
+// has no representation here by construction.
+func (s *Service) connectorView(rec domain.WarehouseConnectorRecord) warehouse.WarehouseConnector {
+	return warehouse.WarehouseConnector{
+		ID:           rec.ID,
+		Name:         rec.Name,
+		Type:         rec.Kind,
+		Endpoint:     rec.Endpoint,
+		DatabaseName: rec.Database,
+		Status:       "configured",
+		CreatedAt:    rec.CreatedAt,
+	}
+}
+
+// CreateWarehouseConnector validates and persists a new user-managed
+// warehouse connector. Duplicate names fail; the password never lands in the
+// connector record itself.
+func (s *Service) CreateWarehouseConnector(ctx context.Context, input WarehouseConnectorInput) (warehouse.WarehouseConnector, error) {
+	if s.warehouseConnectors == nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("warehouse connectors are not configured on this appliance")
+	}
+	name, kind, err := validateConnectorFields(input.Name, input.Kind, input.Endpoint)
+	if err != nil {
+		return warehouse.WarehouseConnector{}, err
+	}
+	existing, err := s.warehouseConnectors.ListWarehouseConnectors(ctx)
+	if err != nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("connector list failed: %w", err)
+	}
+	for _, e := range existing {
+		if strings.EqualFold(e.Name, name) {
+			return warehouse.WarehouseConnector{}, fmt.Errorf("a connector named %q already exists", name)
+		}
+	}
+	id := fmt.Sprintf("whconn-%d", s.now().UnixNano())
+	secretRef, err := s.storeConnectorSecret(id, input.Password)
+	if err != nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("could not store connector secret: %w", err)
+	}
+	now := s.now()
+	rec := domain.WarehouseConnectorRecord{
+		ID:        id,
+		Name:      name,
+		Kind:      kind,
+		Endpoint:  strings.TrimSpace(input.Endpoint),
+		Database:  strings.TrimSpace(input.Database),
+		Username:  strings.TrimSpace(input.Username),
+		SecretRef: secretRef,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.warehouseConnectors.UpsertWarehouseConnector(ctx, rec); err != nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("could not persist connector: %w", err)
+	}
+	s.recordWarehouseAudit("warehouse.connector_created", id, "succeeded", map[string]string{"kind": kind, "endpoint": rec.Endpoint})
+	return s.connectorView(rec), nil
+}
+
+// UpdateWarehouseConnector overlays non-empty fields onto the stored record.
+// Kind changes re-validate the endpoint; a new password replaces the stored
+// secret file. Unknown IDs fail.
+func (s *Service) UpdateWarehouseConnector(ctx context.Context, id string, input WarehouseConnectorInput) (warehouse.WarehouseConnector, error) {
+	if s.warehouseConnectors == nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("warehouse connectors are not configured on this appliance")
+	}
+	rec, ok, err := s.warehouseConnectors.GetWarehouseConnector(ctx, id)
+	if err != nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("connector %q lookup failed: %w", id, err)
+	}
+	if !ok {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("warehouse connector %q not found", id)
+	}
+	name, kind, err := validateConnectorFields(
+		firstNonEmpty(strings.TrimSpace(input.Name), rec.Name),
+		firstNonEmpty(strings.TrimSpace(input.Kind), rec.Kind),
+		firstNonEmpty(strings.TrimSpace(input.Endpoint), rec.Endpoint),
+	)
+	if err != nil {
+		return warehouse.WarehouseConnector{}, err
+	}
+	rec.Name = name
+	rec.Kind = kind
+	rec.Endpoint = firstNonEmpty(strings.TrimSpace(input.Endpoint), rec.Endpoint)
+	rec.Database = strings.TrimSpace(input.Database)
+	rec.Username = strings.TrimSpace(input.Username)
+	if input.Password != "" {
+		secretRef, err := s.storeConnectorSecret(id, input.Password)
+		if err != nil {
+			return warehouse.WarehouseConnector{}, fmt.Errorf("could not store connector secret: %w", err)
+		}
+		rec.SecretRef = secretRef
+	}
+	rec.UpdatedAt = s.now()
+	if err := s.warehouseConnectors.UpsertWarehouseConnector(ctx, rec); err != nil {
+		return warehouse.WarehouseConnector{}, fmt.Errorf("could not persist connector: %w", err)
+	}
+	s.recordWarehouseAudit("warehouse.connector_updated", id, "succeeded", map[string]string{"kind": rec.Kind, "endpoint": rec.Endpoint})
+	return s.connectorView(rec), nil
+}
+
+// DeleteWarehouseConnector removes a stored connector. Running queries that
+// already resolved it are unaffected; future ones fail closed. Unknown IDs fail.
+func (s *Service) DeleteWarehouseConnector(ctx context.Context, id string) error {
+	if s.warehouseConnectors == nil {
+		return fmt.Errorf("warehouse connectors are not configured on this appliance")
+	}
+	deleted, err := s.warehouseConnectors.DeleteWarehouseConnector(ctx, id)
+	if err != nil {
+		return fmt.Errorf("connector %q delete failed: %w", id, err)
+	}
+	if !deleted {
+		return fmt.Errorf("warehouse connector %q not found", id)
+	}
+	s.recordWarehouseAudit("warehouse.connector_deleted", id, "succeeded", nil)
+	return nil
+}
+
+// TestWarehouseConnector verifies a stored connector against its live
+// endpoint. ClickHouse uses the HTTP ping; PostgreSQL and MySQL run a trivial
+// SELECT through their CLIs with the connector's own credentials. The result
+// carries measured latency or the real failure reason, and every attempt is
+// audited.
+func (s *Service) TestWarehouseConnector(ctx context.Context, id string) (warehouse.ConnectorTestResult, error) {
+	rc, err := s.resolveWarehouseConnector(ctx, id, "")
+	if err != nil {
+		return warehouse.ConnectorTestResult{}, err
+	}
+	result := warehouse.ConnectorTestResult{
+		ConnectorID: rc.record.ID,
+		Kind:        rc.record.Kind,
+		TestedAt:    s.now(),
+	}
+	start := time.Now()
+
+	switch rc.record.Kind {
+	case "clickhouse":
+		latency, err := warehouse.NewClickHouseConnector(rc.url, rc.username, rc.password, rc.database).Ping(ctx)
+		result.LatencyMs = time.Since(start).Milliseconds()
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+		} else {
+			result.Status = "connected"
+			result.LatencyMs = latency
+		}
+	case "postgres":
+		dbName := firstNonEmpty(rc.database, "postgres")
+		cmd := exec.CommandContext(ctx, "psql", "-w", "-h", rc.host, "-p", strconv.Itoa(rc.port),
+			"-U", rc.username, "-d", dbName, "--csv", "-c", "SELECT 1")
+		cmd.Env = append(os.Environ(), "PGPASSWORD="+rc.password, "PGCONNECT_TIMEOUT=5")
+		if out, err := cmd.Output(); err != nil {
+			result.Status = "failed"
+			result.Error = psqlTestError(err)
+		} else {
+			result.Status = "connected"
+			_ = out
+		}
+		result.LatencyMs = time.Since(start).Milliseconds()
+	case "mysql":
+		args := []string{"-h", rc.host, "-P", strconv.Itoa(rc.port), "-u", rc.username,
+			"--connect-timeout=5", "-e", "SELECT 1"}
+		if rc.database != "" {
+			args = append(args, "-D", rc.database)
+		}
+		cmd := exec.CommandContext(ctx, "mysql", args...)
+		if rc.password != "" {
+			cmd.Env = append(os.Environ(), "MYSQL_PWD="+rc.password)
+		}
+		if _, err := cmd.Output(); err != nil {
+			result.Status = "failed"
+			result.Error = mysqlTestError(err)
+		} else {
+			result.Status = "connected"
+		}
+		result.LatencyMs = time.Since(start).Milliseconds()
+	}
+
+	meta := map[string]string{"kind": result.Kind, "latency_ms": strconv.FormatInt(result.LatencyMs, 10)}
+	if result.Error != "" {
+		meta["error"] = result.Error
+	}
+	s.recordWarehouseAudit("warehouse.connector_tested", rc.record.ID, mapStatusToAuditOutcome(result.Status), meta)
+	return result, nil
+}
+
+// psqlTestError and mysqlTestError unwrap exec errors into their stderr text
+// so the user sees the engine's real reason, not "exit status 2".
+func psqlTestError(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return strings.TrimSpace(string(exitErr.Stderr))
+	}
+	return err.Error()
+}
+
+func mysqlTestError(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return strings.TrimSpace(string(exitErr.Stderr))
+	}
+	return err.Error()
+}
+
+func mapStatusToAuditOutcome(status string) string {
+	if status == "connected" {
+		return "succeeded"
+	}
+	return "failed"
+}
+
 // EnqueueWarehouseSync registers the job view (so /api/v1/jobs lists it
 // immediately) and pushes a durable warehouse_sync job onto the persistent
 // queue for a scheduler worker to execute. Demo mode keeps its simulated
@@ -907,6 +1395,7 @@ func (s *Service) queueWarehouseSyncJob(pxJobID, databaseID string, opts Warehou
 		"job_id":           pxJobID,
 		"incremental":      opts.Incremental,
 		"watermark_column": opts.WatermarkColumn,
+		"connector_id":     opts.ConnectorID,
 	})
 	if err != nil {
 		return err
@@ -933,6 +1422,7 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 		JobID           string `json:"job_id"`
 		Incremental     bool   `json:"incremental"`
 		WatermarkColumn string `json:"watermark_column"`
+		ConnectorID     string `json:"connector_id"`
 	}
 	if len(job.PayloadJSON) > 0 {
 		_ = json.Unmarshal(job.PayloadJSON, &payload)
@@ -941,7 +1431,7 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 	if databaseID == "" {
 		databaseID = job.ResourceID
 	}
-	opts := WarehouseSyncOptions{Incremental: payload.Incremental, WatermarkColumn: payload.WatermarkColumn}
+	opts := WarehouseSyncOptions{Incremental: payload.Incremental, WatermarkColumn: payload.WatermarkColumn, ConnectorID: payload.ConnectorID}
 	jobID := payload.JobID
 	s.mu.Lock()
 	_, recordAlive := s.jobs[jobID]
@@ -956,6 +1446,7 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 	s.updateJobStage(jobID, "extract", 15, fmt.Sprintf("Extracting source tables for %s", databaseID))
 	if err := s.runWarehouseSyncPipeline(ctx, databaseID, opts); err != nil {
 		s.failJob(jobID, "transform_parquet", fmt.Sprintf("Warehouse sync failed: %v", err))
+		s.auditWorkerSyncEvent("warehouse.sync_failed", databaseID, opts, "failed", map[string]string{"error": err.Error()})
 		return nil, err
 	}
 	mode := "full refresh"
@@ -968,6 +1459,7 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 	s.updateJobStage(jobID, "validate_indexes", 95, "Validated warehouse artifacts")
 	s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("Data Warehouse synchronized successfully for %s (%s)", databaseID, mode))
 	s.appendLog(jobID, "info", "complete", fmt.Sprintf("Warehouse sync finished for %s. Verified Parquet datasets and catalogue evidence are ready.", databaseID))
+	s.auditWorkerSyncEvent("warehouse.sync_completed", databaseID, opts, "succeeded", nil)
 	return json.Marshal(map[string]any{"job_id": jobID, "database": databaseID, "schedule": payload.Schedule, "status": "complete", "mode": opts.Incremental})
 }
 
@@ -1007,6 +1499,9 @@ func validateWarehouseQuery(raw string) error {
 }
 
 // executeLiveDBQuery routes an analytical SQL query to the live PostgreSQL or MySQL database.
+// When the request carries a connector_id, host and credentials come from the
+// stored warehouse connector (secret resolved at use-time) instead of the
+// appliance's ambient source configuration.
 func (s *Service) executeLiveDBQuery(ctx context.Context, req warehouse.QueryRequest) (*warehouse.QueryResult, error) {
 	start := time.Now()
 	dbID := req.Database
@@ -1030,11 +1525,37 @@ func (s *Service) executeLiveDBQuery(ctx context.Context, req warehouse.QueryReq
 		dbName = targetDB.Name
 	}
 
+	// Connector override: fail closed on unknown connectors or a kind that
+	// does not match the target engine rather than silently using another
+	// credential set.
+	var conn *resolvedConnector
+	if req.ConnectorID != "" {
+		got, err := s.resolveWarehouseConnector(ctx, req.ConnectorID, "")
+		if err != nil {
+			return nil, err
+		}
+		isMySQL := strings.Contains(engine, "mysql") || strings.Contains(engine, "mariadb")
+		want := "postgres"
+		if isMySQL {
+			want = "mysql"
+		}
+		if got.record.Kind != want {
+			return nil, fmt.Errorf("warehouse connector %q has kind %q, but the target database engine is %q", req.ConnectorID, got.record.Kind, engine)
+		}
+		conn = &got
+		if !found && got.database != "" {
+			dbName = got.database
+		}
+	}
+
 	var rows [][]any
 	var cols []warehouse.ColumnMeta
 
 	if strings.Contains(engine, "mysql") || strings.Contains(engine, "mariadb") {
 		mHost, mPort, mUser, mPass := s.resolveMySQLParams()
+		if conn != nil {
+			mHost, mPort, mUser, mPass = conn.host, conn.port, conn.username, conn.password
+		}
 		args := []string{
 			"-h", mHost,
 			"-P", strconv.Itoa(mPort),
@@ -1055,6 +1576,9 @@ func (s *Service) executeLiveDBQuery(ctx context.Context, req warehouse.QueryReq
 		rows, cols = parseMySQLBatchOutput(out)
 	} else {
 		pgHost, pgPort, pgUser, pgPass := s.resolvePostgresParams()
+		if conn != nil {
+			pgHost, pgPort, pgUser, pgPass = conn.host, conn.port, conn.username, conn.password
+		}
 		args := []string{
 			"-w",
 			"-h", pgHost,
@@ -1246,11 +1770,11 @@ func (s *Service) seedDefaultWarehouseTables() {
 	_ = s.warehouseEngine.SeedDataset("lakehouse_metrics", metricCols, metricRows)
 }
 
-// GetWarehouseConnectors returns only genuinely configured external OLAP
-// destinations. Until connector persistence exists, no external connectors are
-// configurable: the list contains the embedded engine (whose status is derived
-// from real CLI detection on this host) and nothing else. No latency, sync
-// schedule, or timestamps are reported because none are measured.
+// GetWarehouseConnectors returns the embedded engine plus every user-managed
+// external connector in the store. Status is honest: the embedded engine
+// reports real CLI detection, stored connectors report "configured" until a
+// connectivity test proves otherwise. No latency or sync timestamps are
+// invented.
 func (s *Service) GetWarehouseConnectors(ctx context.Context) []warehouse.WarehouseConnector {
 	s.initWarehouse()
 	var out []warehouse.WarehouseConnector
@@ -1263,18 +1787,121 @@ func (s *Service) GetWarehouseConnectors(ctx context.Context) []warehouse.Wareho
 			Status:   s.warehouseEngine.Status(),
 		})
 	}
+	if s.warehouseConnectors != nil {
+		records, err := s.warehouseConnectors.ListWarehouseConnectors(ctx)
+		if err == nil {
+			sort.Slice(records, func(i, j int) bool { return records[i].CreatedAt.Before(records[j].CreatedAt) })
+			for _, rec := range records {
+				out = append(out, s.connectorView(rec))
+			}
+		}
+	}
 	return out
 }
 
-// ExportWarehouseResults generates a downloadable CSV / JSON / Parquet export of query results.
+// warehouseExportMaxRows is the hard cap on rows leaving the appliance
+// through the export path. The query path already truncates at 10k rows; the
+// cap is defense in depth for direct dataset exports.
+const warehouseExportMaxRows = 50000
+
+// warehouseSensitiveRule classifies a column name against the same pattern
+// vocabulary the privacy masking rules API advertises. Empty means the column
+// carries no sensitive classification.
+func warehouseSensitiveRule(column string) string {
+	name := strings.ToLower(column)
+	switch {
+	case strings.Contains(name, "email"):
+		return "rule-email"
+	case strings.Contains(name, "password"), strings.Contains(name, "pass_hash"), strings.Contains(name, "secret"):
+		return "rule-password"
+	case strings.Contains(name, "phone"), strings.Contains(name, "mobile"), strings.Contains(name, "tel"):
+		return "rule-phone"
+	case strings.Contains(name, "card_num"), strings.Contains(name, "cc_number"), strings.Contains(name, "cvv"):
+		return "rule-card"
+	case strings.Contains(name, "api_key"), strings.Contains(name, "auth_token"), strings.Contains(name, "jwt"):
+		return "rule-token"
+	}
+	return ""
+}
+
+// maskWarehouseValue applies a rule's strategy to one cell. Email and token
+// masking is deterministic so repeated exports stay consistent; credentials
+// and card data are fully redacted.
+func maskWarehouseValue(rule, value string) string {
+	switch rule {
+	case "rule-password", "rule-card":
+		return "[REDACTED]"
+	case "rule-email":
+		sum := sha256.Sum256([]byte(strings.ToLower(value)))
+		return fmt.Sprintf("user_%s@anonymized.internal", hex.EncodeToString(sum[:4]))
+	case "rule-phone":
+		return "+1 (555) 010-0000"
+	case "rule-token":
+		sum := sha256.Sum256([]byte(value))
+		return "tk_" + hex.EncodeToString(sum[:4])
+	}
+	return value
+}
+
+// applyWarehouseMasking returns a copy of the result with sensitive columns
+// transformed, plus the sorted list of masked column names for the audit
+// trail. The original result is never mutated.
+func applyWarehouseMasking(res *warehouse.QueryResult) ([]string, *warehouse.QueryResult) {
+	if res == nil {
+		return nil, res
+	}
+	ruleByCol := make(map[int]string)
+	var maskedCols []string
+	for i, c := range res.Columns {
+		if rule := warehouseSensitiveRule(c.Name); rule != "" {
+			ruleByCol[i] = rule
+			maskedCols = append(maskedCols, c.Name)
+		}
+	}
+	if len(ruleByCol) == 0 {
+		return nil, res
+	}
+	out := *res
+	out.Rows = make([][]any, len(res.Rows))
+	for r, row := range res.Rows {
+		newRow := make([]any, len(row))
+		copy(newRow, row)
+		for i, rule := range ruleByCol {
+			if i < len(newRow) && newRow[i] != nil {
+				newRow[i] = maskWarehouseValue(rule, fmt.Sprintf("%v", newRow[i]))
+			}
+		}
+		out.Rows[r] = newRow
+	}
+	sort.Strings(maskedCols)
+	return maskedCols, &out
+}
+
+// ExportWarehouseResults generates a downloadable CSV / JSON export of query
+// results. Sensitive columns are masked per the privacy rules, rows are
+// capped, the ConnectorID rides through to the query path, and every export
+// attempt is audited with its real row count and masked columns.
 func (s *Service) ExportWarehouseResults(ctx context.Context, req warehouse.QueryRequest, format string) ([]byte, string, string, error) {
+	start := time.Now()
 	res, err := s.ExecuteWarehouseQuery(ctx, req)
 	if err != nil {
+		s.recordWarehouseAudit("warehouse.export", req.Database, "failed", map[string]string{
+			"format": format, "error": err.Error(),
+		})
 		return nil, "", "", err
 	}
 
+	maskedCols, res := applyWarehouseMasking(res)
+	if res.RowCount > warehouseExportMaxRows {
+		res.Rows = res.Rows[:warehouseExportMaxRows]
+		res.RowCount = warehouseExportMaxRows
+	}
+	exportedRows := res.RowCount
+
 	filename := fmt.Sprintf("dbvault_query_export_%s", time.Now().Format("20060102_150405"))
 
+	var data []byte
+	var contentType string
 	switch strings.ToLower(format) {
 	case "csv":
 		var buf bytes.Buffer
@@ -1298,7 +1925,9 @@ func (s *Service) ExportWarehouseResults(ctx context.Context, req warehouse.Quer
 			_ = w.Write(rowStr)
 		}
 		w.Flush()
-		return buf.Bytes(), filename + ".csv", "text/csv", nil
+		data = buf.Bytes()
+		contentType = "text/csv"
+		filename += ".csv"
 
 	case "json":
 		var outputRows []map[string]any
@@ -1313,13 +1942,38 @@ func (s *Service) ExportWarehouseResults(ctx context.Context, req warehouse.Quer
 		}
 		b, err := json.MarshalIndent(outputRows, "", "  ")
 		if err != nil {
+			s.recordWarehouseAudit("warehouse.export", req.Database, "failed", map[string]string{
+				"format": "json", "error": err.Error(),
+			})
 			return nil, "", "", err
 		}
-		return b, filename + ".json", "application/json", nil
+		data = b
+		contentType = "application/json"
+		filename += ".json"
 
 	default:
-		return nil, "", "", fmt.Errorf("unsupported export format %q (use csv or json)", format)
+		err := fmt.Errorf("unsupported export format %q (use csv or json)", format)
+		s.recordWarehouseAudit("warehouse.export", req.Database, "failed", map[string]string{
+			"format": format, "error": err.Error(),
+		})
+		return nil, "", "", err
 	}
+
+	meta := map[string]string{
+		"format":       strings.ToLower(format),
+		"rows":         strconv.Itoa(exportedRows),
+		"duration_ms":  strconv.FormatInt(time.Since(start).Milliseconds(), 10),
+		"masked":       "false",
+	}
+	if len(maskedCols) > 0 {
+		meta["masked"] = "true"
+		meta["masked_columns"] = strings.Join(maskedCols, ",")
+	}
+	if req.ConnectorID != "" {
+		meta["connector_id"] = req.ConnectorID
+	}
+	s.recordWarehouseAudit("warehouse.export", req.Database, "succeeded", meta)
+	return data, filename, contentType, nil
 }
 
 // BIPowerBIDataset represents an exportable analytical dataset for Power BI & BI tools.

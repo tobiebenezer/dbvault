@@ -40,6 +40,7 @@ type state struct {
 	Audit             []AuditEvent                       `json:"audit"`
 	Leases            map[string]LeaseRecord             `json:"leases"`
 	WarehouseDatasets map[string]domain.WarehouseDataset `json:"warehouse_datasets,omitempty"`
+	Connectors        map[string]domain.WarehouseConnectorRecord `json:"warehouse_connectors,omitempty"`
 	UpdatedAt         time.Time                          `json:"updated_at"`
 }
 
@@ -85,7 +86,7 @@ func Open(path string) (*Catalogue, error) {
 }
 
 func newState() state {
-	return state{Version: 2, Runs: map[string]domain.BackupRun{}, Snapshots: map[string]domain.Snapshot{}, Links: map[string][]domain.SnapshotChunk{}, Chunks: map[string]domain.Chunk{}, Leases: map[string]LeaseRecord{}, Audit: []AuditEvent{}, WarehouseDatasets: map[string]domain.WarehouseDataset{}, UpdatedAt: time.Now().UTC()}
+	return state{Version: 2, Runs: map[string]domain.BackupRun{}, Snapshots: map[string]domain.Snapshot{}, Links: map[string][]domain.SnapshotChunk{}, Chunks: map[string]domain.Chunk{}, Leases: map[string]LeaseRecord{}, Audit: []AuditEvent{}, WarehouseDatasets: map[string]domain.WarehouseDataset{}, Connectors: map[string]domain.WarehouseConnectorRecord{}, UpdatedAt: time.Now().UTC()}
 }
 func (c *Catalogue) ensureMaps() {
 	if c.db.Runs == nil {
@@ -105,6 +106,9 @@ func (c *Catalogue) ensureMaps() {
 	}
 	if c.db.WarehouseDatasets == nil {
 		c.db.WarehouseDatasets = map[string]domain.WarehouseDataset{}
+	}
+	if c.db.Connectors == nil {
+		c.db.Connectors = map[string]domain.WarehouseConnectorRecord{}
 	}
 }
 func (c *Catalogue) Close() error { return nil }
@@ -254,6 +258,41 @@ func (c *Catalogue) ListWarehouseDatasets(ctx context.Context, databaseID string
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastSyncAt.After(out[j].LastSyncAt) })
+	return out, nil
+}
+
+func (c *Catalogue) UpsertWarehouseConnector(ctx context.Context, conn domain.WarehouseConnectorRecord) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.db.Connectors[conn.ID] = conn
+	return c.flushLocked()
+}
+
+func (c *Catalogue) GetWarehouseConnector(ctx context.Context, id string) (domain.WarehouseConnectorRecord, bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	conn, ok := c.db.Connectors[id]
+	return conn, ok, nil
+}
+
+func (c *Catalogue) DeleteWarehouseConnector(ctx context.Context, id string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.db.Connectors[id]; !ok {
+		return false, nil
+	}
+	delete(c.db.Connectors, id)
+	return true, c.flushLocked()
+}
+
+func (c *Catalogue) ListWarehouseConnectors(ctx context.Context) ([]domain.WarehouseConnectorRecord, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := []domain.WarehouseConnectorRecord{}
+	for _, conn := range c.db.Connectors {
+		out = append(out, conn)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 func max64(a, b int64) int64 {

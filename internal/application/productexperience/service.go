@@ -50,7 +50,10 @@ type Service struct {
 	biConnections            map[string]BIConnection
 	activeLiveJobs           map[string]bool
 	jobQueue                 ports.JobQueue
-	warehouseSyncRunner      func(ctx context.Context, databaseID string) error
+	warehouseEvidence        ports.WarehouseEvidenceStore
+	warehouseConnectors      ports.WarehouseConnectorStore
+	secretResolver           func(config.SecretReference) (string, error)
+	warehouseSyncRunner      func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error
 	warehouseEngine          *warehouse.DuckDBEngine
 	auditEvents              []domain.AuditEvent
 	demo                     bool

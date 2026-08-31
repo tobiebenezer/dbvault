@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dbvault/dbvault/internal/adapters/catalogue/memory"
+	catsqlite "github.com/dbvault/dbvault/internal/adapters/catalogue/sqlite"
 	gzipc "github.com/dbvault/dbvault/internal/adapters/compression/gzip"
 	"github.com/dbvault/dbvault/internal/adapters/encryption/aead"
 	"github.com/dbvault/dbvault/internal/adapters/id"
@@ -983,6 +984,19 @@ func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, ena
 		}})
 	// Hand the durable queue to the product-experience service so the
 	// warehouse sync API enqueues real jobs instead of spawning goroutines.
+	// Sync evidence persists in a catalogue file beside the job queue so
+	// watermarks and measured dataset facts survive restarts.
+	if cat, err := catsqlite.Open(filepath.Join(dataDir, "warehouse-catalogue.json")); err == nil {
+		px.SetWarehouseEvidence(cat)
+		px.SetWarehouseConnectors(cat)
+	} else {
+		logger.Warn("warehouse evidence store unavailable; catalog falls back to filesystem facts", "error", err)
+	}
+	// Connector credentials resolve through the loaded config at use-time so
+	// stored connector records never carry secret material themselves.
+	px.SetSecretResolver(func(ref config.SecretReference) (string, error) {
+		return cfg.ResolveSecret(ref, false)
+	})
 	px.SetJobQueue(q)
 	workers := cfg.Schedule.Workers
 	if workers <= 0 {

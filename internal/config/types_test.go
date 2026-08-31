@@ -18,6 +18,33 @@ func TestUnknownRepositoryReferenceFails(t *testing.T) {
 	}
 }
 
+func TestWarehouseSyncScheduleValidates(t *testing.T) {
+	enabled := true
+	cfg := validGraph()
+	cfg.Schedules = []ScheduleConfig{{ID: "wh-nightly", Source: "source", Operation: "warehouse_sync", EverySeconds: 300, Enabled: &enabled}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("warehouse_sync schedule with every_seconds rejected: %v", err)
+	}
+}
+
+func TestUnknownScheduleOperationFails(t *testing.T) {
+	enabled := true
+	cfg := validGraph()
+	cfg.Schedules = []ScheduleConfig{{ID: "bad", Source: "source", Operation: "stargate", Cron: "0 2 * * *", Enabled: &enabled}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "unsupported operation") {
+		t.Fatalf("expected unsupported operation error, got %v", err)
+	}
+}
+
+func TestScheduleWithoutTimingFails(t *testing.T) {
+	enabled := true
+	cfg := validGraph()
+	cfg.Schedules = []ScheduleConfig{{ID: "no-timing", Source: "source", Operation: "warehouse_sync", Enabled: &enabled}}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "cron or every_seconds") {
+		t.Fatalf("expected missing timing error, got %v", err)
+	}
+}
+
 func TestBindingResolvesSourceRepositoryDestination(t *testing.T) {
 	cfg := validGraph()
 	cfg.Normalize()

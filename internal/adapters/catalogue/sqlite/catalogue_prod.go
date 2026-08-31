@@ -100,6 +100,17 @@ func (c *Catalogue) migrate(ctx context.Context) error {
 			UNIQUE(database_id, dataset_name)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_wh_datasets_db ON warehouse_datasets(database_id);`,
+		`CREATE TABLE IF NOT EXISTS warehouse_connectors(
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			database TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
+			secret_ref TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -388,6 +399,84 @@ func scanWarehouseDataset(scan func(dest ...any) error) (domain.WarehouseDataset
 		ds.ParquetPaths = []string{}
 	}
 	return ds, nil
+}
+
+func (c *Catalogue) UpsertWarehouseConnector(ctx context.Context, conn domain.WarehouseConnectorRecord) error {
+	_, err := c.db.ExecContext(ctx, `INSERT INTO warehouse_connectors(
+			id, name, kind, endpoint, database, username, secret_ref, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,
+			kind=excluded.kind,
+			endpoint=excluded.endpoint,
+			database=excluded.database,
+			username=excluded.username,
+			secret_ref=excluded.secret_ref,
+			updated_at=excluded.updated_at`,
+		conn.ID, conn.Name, conn.Kind, conn.Endpoint, conn.Database, conn.Username, conn.SecretRef,
+		conn.CreatedAt.UTC().Format(time.RFC3339Nano), conn.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (c *Catalogue) GetWarehouseConnector(ctx context.Context, id string) (domain.WarehouseConnectorRecord, bool, error) {
+	row := c.db.QueryRowContext(ctx, `SELECT
+			id, name, kind, endpoint, database, username, secret_ref, created_at, updated_at
+		FROM warehouse_connectors WHERE id=?`, id)
+	conn, err := scanWarehouseConnector(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WarehouseConnectorRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.WarehouseConnectorRecord{}, false, err
+	}
+	return conn, true, nil
+}
+
+func (c *Catalogue) DeleteWarehouseConnector(ctx context.Context, id string) (bool, error) {
+	res, err := c.db.ExecContext(ctx, `DELETE FROM warehouse_connectors WHERE id=?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (c *Catalogue) ListWarehouseConnectors(ctx context.Context) ([]domain.WarehouseConnectorRecord, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT
+			id, name, kind, endpoint, database, username, secret_ref, created_at, updated_at
+		FROM warehouse_connectors ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.WarehouseConnectorRecord{}
+	for rows.Next() {
+		conn, err := scanWarehouseConnector(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, conn)
+	}
+	return out, rows.Err()
+}
+
+func scanWarehouseConnector(scan func(dest ...any) error) (domain.WarehouseConnectorRecord, error) {
+	var conn domain.WarehouseConnectorRecord
+	var createdAt, updatedAt string
+	if err := scan(&conn.ID, &conn.Name, &conn.Kind, &conn.Endpoint, &conn.Database, &conn.Username,
+		&conn.SecretRef, &createdAt, &updatedAt); err != nil {
+		return domain.WarehouseConnectorRecord{}, err
+	}
+	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+		conn.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, updatedAt); err == nil {
+		conn.UpdatedAt = t
+	}
+	return conn, nil
 }
 
 func boolToInt(b bool) int {

@@ -11,6 +11,10 @@ type QueryRequest struct {
 	Limit     int    `json:"limit,omitempty"`
 	Database  string `json:"database,omitempty"`
 	TimeoutMs int    `json:"timeout_ms,omitempty"`
+	// ConnectorID routes the query through a stored warehouse connector
+	// (host/credentials from the catalogue) instead of the appliance's
+	// ambient source configuration. Required for ClickHouse.
+	ConnectorID string `json:"connector_id,omitempty"`
 }
 
 // ColumnMeta describes a column in the query result.
@@ -30,6 +34,17 @@ type QueryResult struct {
 	ExecutedAt   time.Time        `json:"executed_at"`
 	Cached       bool             `json:"cached"`
 	Error        string           `json:"error,omitempty"`
+}
+
+// ConnectorTestResult reports the outcome of one connector connectivity test.
+// Latency is measured, not estimated; Error carries the real failure reason.
+type ConnectorTestResult struct {
+	ConnectorID string    `json:"connector_id"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status"` // "connected" | "failed"
+	LatencyMs   int64     `json:"latency_ms"`
+	Error       string    `json:"error,omitempty"`
+	TestedAt    time.Time `json:"tested_at"`
 }
 
 // TableDataset represents a columnar Parquet dataset in the lakehouse.

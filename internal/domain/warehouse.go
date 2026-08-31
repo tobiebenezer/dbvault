@@ -41,3 +41,20 @@ type WarehouseDataset struct {
 func WarehouseDatasetKey(databaseID, datasetName string) string {
 	return databaseID + ":" + datasetName
 }
+
+// WarehouseConnectorRecord is one user-managed warehouse connector persisted
+// in the catalogue. Credential material never lives in this record: SecretRef
+// holds a SecretReference document (env/file/provider pointer) serialized as
+// JSON, and the password materializes only at use-time through the config
+// secret resolver. Plaintext secrets are rejected at write time.
+type WarehouseConnectorRecord struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"` // clickhouse | postgres | mysql
+	Endpoint  string    `json:"endpoint"`
+	Database  string    `json:"database"`
+	Username  string    `json:"username"`
+	SecretRef string    `json:"secret_ref"` // SecretReference JSON; never a plaintext password
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}

@@ -141,7 +141,7 @@ func (s *Service) CreateJob(jobType, resourceID, resourceName string) domain.Job
 		} else if jobType == "warehouse_sync" {
 			// Durable path: the sync executes on a scheduler worker after the
 			// job is leased from the persistent queue, never a local goroutine.
-			if err := s.queueWarehouseSyncJob(view.ID, resourceID); err != nil {
+			if err := s.queueWarehouseSyncJob(view.ID, resourceID, WarehouseSyncOptions{}); err != nil {
 				s.failJob(view.ID, "extract", fmt.Sprintf("Warehouse sync not queued: %v", err))
 			} else {
 				s.appendLog(view.ID, "info", view.Stage, "Queued on the durable scheduler.")

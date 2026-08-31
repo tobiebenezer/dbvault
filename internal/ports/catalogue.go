@@ -23,3 +23,12 @@ type WarehouseEvidenceStore interface {
 	GetWarehouseDataset(ctx context.Context, databaseID, datasetName string) (domain.WarehouseDataset, bool, error)
 	ListWarehouseDatasets(ctx context.Context, databaseID string) ([]domain.WarehouseDataset, error)
 }
+
+// WarehouseConnectorStore persists user-managed warehouse connectors. Records
+// carry secret references, never secret material.
+type WarehouseConnectorStore interface {
+	UpsertWarehouseConnector(ctx context.Context, c domain.WarehouseConnectorRecord) error
+	GetWarehouseConnector(ctx context.Context, id string) (domain.WarehouseConnectorRecord, bool, error)
+	DeleteWarehouseConnector(ctx context.Context, id string) (bool, error)
+	ListWarehouseConnectors(ctx context.Context) ([]domain.WarehouseConnectorRecord, error)
+}

@@ -192,6 +192,7 @@ func (a *Appliance) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/warehouse/query", a.warehouseQuery)
 	mux.HandleFunc("/api/v1/warehouse/sync", a.warehouseSync)
 	mux.HandleFunc("/api/v1/warehouse/connectors", a.warehouseConnectors)
+	mux.HandleFunc("/api/v1/warehouse/connectors/test", a.warehouseConnectorTest)
 	mux.HandleFunc("/api/v1/warehouse/export", a.warehouseExport)
 	// Privacy & PII Data Masking Policy
 	mux.HandleFunc("/api/v1/privacy/masking-rules", a.privacyMaskingRules)
@@ -1807,13 +1808,14 @@ func (a *Appliance) warehouseSync(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DatabaseID  string `json:"database_id"`
 		ConnectorID string `json:"connector_id"`
+		Incremental bool   `json:"incremental"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
 	dbID := req.DatabaseID
 	if dbID == "" {
 		dbID = "all-databases"
 	}
-	job, err := a.px.EnqueueWarehouseSync(r.Context(), dbID)
+	job, err := a.px.EnqueueWarehouseSync(r.Context(), dbID, productexperience.WarehouseSyncOptions{Incremental: req.Incremental, ConnectorID: req.ConnectorID})
 	if err != nil {
 		// Fail closed: no durable scheduler means no honest way to run the sync.
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -1823,11 +1825,70 @@ func (a *Appliance) warehouseSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Appliance) warehouseConnectors(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"connectors": a.px.GetWarehouseConnectors(r.Context())})
+	case http.MethodPost:
+		var req productexperience.WarehouseConnectorInput
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		view, err := a.px.CreateWarehouseConnector(r.Context(), req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, view)
+	case http.MethodPut:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector id query parameter is required"})
+			return
+		}
+		var req productexperience.WarehouseConnectorInput
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		view, err := a.px.UpdateWarehouseConnector(r.Context(), id, req)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodDelete:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector id query parameter is required"})
+			return
+		}
+		if err := a.px.DeleteWarehouseConnector(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": id})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *Appliance) warehouseConnectorTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"connectors": a.px.GetWarehouseConnectors(r.Context())})
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector id query parameter is required"})
+		return
+	}
+	result, err := a.px.TestWarehouseConnector(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *Appliance) warehouseExport(w http.ResponseWriter, r *http.Request) {
@@ -1836,10 +1897,11 @@ func (a *Appliance) warehouseExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Query    string `json:"query"`
-		Format   string `json:"format"`
-		Engine   string `json:"engine"`
-		Database string `json:"database"`
+		Query       string `json:"query"`
+		Format      string `json:"format"`
+		Engine      string `json:"engine"`
+		Database    string `json:"database"`
+		ConnectorID string `json:"connector_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1848,7 +1910,7 @@ func (a *Appliance) warehouseExport(w http.ResponseWriter, r *http.Request) {
 	if req.Format == "" {
 		req.Format = "csv"
 	}
-	data, filename, contentType, err := a.px.ExportWarehouseResults(r.Context(), warehouse.QueryRequest{Query: req.Query, Engine: req.Engine, Database: req.Database}, req.Format)
+	data, filename, contentType, err := a.px.ExportWarehouseResults(r.Context(), warehouse.QueryRequest{Query: req.Query, Engine: req.Engine, Database: req.Database, ConnectorID: req.ConnectorID}, req.Format)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
