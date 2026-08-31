@@ -74,42 +74,29 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 			if t.Excluded {
 				continue
 			}
-			rows := t.EstimatedRows
-			if rows <= 0 {
-				rows = 500
-			}
-			rawSize := t.DataSizeBytes + t.IndexSizeBytes
-			if rawSize <= 0 {
-				rawSize = rows * 128
-			}
-			cols := []warehouse.ColumnMeta{
-				{Name: "id", Type: "BIGINT"},
-				{Name: "created_at", Type: "TIMESTAMP"},
-				{Name: "updated_at", Type: "TIMESTAMP"},
-				{Name: "status", Type: "VARCHAR(64)"},
-				{Name: "payload", Type: "JSON"},
-			}
-
+			// Report only what the live schema actually reported. Row counts
+			// and byte sizes come from the source database; when the source
+			// could not measure them they stay zero instead of being invented.
 			tblDataset := warehouse.TableDataset{
 				Name:              t.Name,
 				Database:          db.Name,
 				EngineSource:      db.Engine,
-				Columns:           cols,
-				RowCount:          rows,
+				Columns:           []warehouse.ColumnMeta{},
+				RowCount:          t.EstimatedRows,
 				ParquetSizeBytes:  0,
-				UncompressedBytes: rawSize,
-				CompressionRatio:  0,
-				ParquetLocation:   "",
-				PartitionKey:      "created_at (monthly)",
+				UncompressedBytes: t.DataSizeBytes + t.IndexSizeBytes,
 				PartitionCount:    0,
 				LastSyncedAt:      time.Time{},
-				SyncStatus:        "pending",
+				SyncStatus:        "never_synced",
 			}
 			if parquetPath := s.warehouseParquetPath(db.ID, t.Name); parquetPath != "" {
 				if info, err := os.Stat(parquetPath); err == nil && info.Size() > 0 {
 					tblDataset.ParquetSizeBytes = info.Size()
 					tblDataset.ParquetLocation = parquetPath
-					tblDataset.CompressionRatio = float64(rawSize) / float64(info.Size())
+					// Ratio only from actually measured bytes on both sides.
+					if tblDataset.UncompressedBytes > 0 {
+						tblDataset.CompressionRatio = float64(tblDataset.UncompressedBytes) / float64(info.Size())
+					}
 					tblDataset.PartitionCount = 1
 					tblDataset.LastSyncedAt = info.ModTime().UTC()
 					tblDataset.SyncStatus = "synced"
@@ -118,16 +105,15 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 			}
 
 			dbDataset.Tables = append(dbDataset.Tables, tblDataset)
-			dbDataset.TotalRows += rows
+			dbDataset.TotalRows += tblDataset.RowCount
 			dbDataset.TotalParquetBytes += tblDataset.ParquetSizeBytes
-			dbDataset.TotalRawBytes += rawSize
+			dbDataset.TotalRawBytes += tblDataset.UncompressedBytes
 			totalTables++
 		}
 
-		if dbDataset.TotalParquetBytes > 0 {
+		// Ratio only when both totals were actually measured.
+		if dbDataset.TotalParquetBytes > 0 && dbDataset.TotalRawBytes > 0 {
 			dbDataset.CompressionRatio = float64(dbDataset.TotalRawBytes) / float64(dbDataset.TotalParquetBytes)
-		} else {
-			dbDataset.CompressionRatio = 0
 		}
 
 		totalRows += dbDataset.TotalRows
@@ -138,8 +124,12 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 	}
 
 	// Demo data is explicit. A normal installation must never report fabricated
-	// customer datasets when no source has been synchronized.
+	// customer datasets when no source has been synchronized. Even here, every
+	// compression ratio is derived from the fixture's own byte counts rather
+	// than invented constants.
 	if demo && len(dbDatasets) == 0 {
+		usersRaw, usersParquet := int64(22000000), int64(4200000)
+		txRaw, txParquet := int64(104000000), int64(18500000)
 		sampleTables := []warehouse.TableDataset{
 			{
 				Name:              "users",
@@ -147,9 +137,9 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 				EngineSource:      "postgres",
 				Columns:           []warehouse.ColumnMeta{{Name: "id", Type: "BIGINT"}, {Name: "email", Type: "VARCHAR"}, {Name: "plan", Type: "VARCHAR"}, {Name: "created_at", Type: "TIMESTAMP"}},
 				RowCount:          125000,
-				ParquetSizeBytes:  4200000,
-				UncompressedBytes: 22000000,
-				CompressionRatio:  5.24,
+				ParquetSizeBytes:  usersParquet,
+				UncompressedBytes: usersRaw,
+				CompressionRatio:  float64(usersRaw) / float64(usersParquet),
 				ParquetLocation:   "s3://dbvault-backups/lakehouse/cribx_test/users/data.parquet",
 				PartitionKey:      "created_at (monthly)",
 				PartitionCount:    12,
@@ -162,9 +152,9 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 				EngineSource:      "postgres",
 				Columns:           []warehouse.ColumnMeta{{Name: "id", Type: "BIGINT"}, {Name: "user_id", Type: "BIGINT"}, {Name: "amount", Type: "DECIMAL"}, {Name: "currency", Type: "VARCHAR(3)"}, {Name: "status", Type: "VARCHAR"}, {Name: "created_at", Type: "TIMESTAMP"}},
 				RowCount:          890000,
-				ParquetSizeBytes:  18500000,
-				UncompressedBytes: 104000000,
-				CompressionRatio:  5.62,
+				ParquetSizeBytes:  txParquet,
+				UncompressedBytes: txRaw,
+				CompressionRatio:  float64(txRaw) / float64(txParquet),
 				ParquetLocation:   "s3://dbvault-backups/lakehouse/cribx_test/transactions/data.parquet",
 				PartitionKey:      "created_at (daily)",
 				PartitionCount:    90,
@@ -173,25 +163,28 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 			},
 		}
 
+		demoTotalRaw := usersRaw + txRaw
+		demoTotalParquet := usersParquet + txParquet
 		dbDatasets = append(dbDatasets, warehouse.DatabaseDataset{
 			ID:                "cribx_test",
 			Name:              "cribx_test",
 			EngineSource:      "postgres",
 			Tables:            sampleTables,
 			TotalRows:         1015000,
-			TotalParquetBytes: 22700000,
-			TotalRawBytes:     126000000,
-			CompressionRatio:  5.55,
+			TotalParquetBytes: demoTotalParquet,
+			TotalRawBytes:     demoTotalRaw,
+			CompressionRatio:  float64(demoTotalRaw) / float64(demoTotalParquet),
 			LastSyncAt:        now.Add(-5 * time.Minute),
 		})
 		totalTables = len(sampleTables)
 		totalRows = 1015000
-		totalParquet = 22700000
-		totalRaw = 126000000
+		totalParquet = demoTotalParquet
+		totalRaw = demoTotalRaw
 	}
 
-	overallRatio := 5.2
-	if totalParquet > 0 {
+	// Overall ratio exists only when both byte totals were actually measured.
+	var overallRatio float64
+	if totalRaw > 0 && totalParquet > 0 {
 		overallRatio = float64(totalRaw) / float64(totalParquet)
 	}
 
@@ -207,7 +200,7 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 		TotalParquetBytes:       totalParquet,
 		TotalRawBytes:           totalRaw,
 		OverallCompressionRatio: overallRatio,
-		StorageEngine:           "Cloudflare R2 (Apache Parquet) + Embedded DuckDB",
+		StorageEngine:           "Local Apache Parquet (ZSTD) + embedded query engine",
 		GeneratedAt:             now,
 	}
 }
@@ -662,45 +655,24 @@ func (s *Service) seedDefaultWarehouseTables() {
 	_ = s.warehouseEngine.SeedDataset("lakehouse_metrics", metricCols, metricRows)
 }
 
-// GetWarehouseConnectors returns list of configured external OLAP destinations.
+// GetWarehouseConnectors returns only genuinely configured external OLAP
+// destinations. Until connector persistence exists, no external connectors are
+// configurable: the list contains the embedded engine (whose status is derived
+// from real CLI detection on this host) and nothing else. No latency, sync
+// schedule, or timestamps are reported because none are measured.
 func (s *Service) GetWarehouseConnectors(ctx context.Context) []warehouse.WarehouseConnector {
-	s.mu.Lock()
-	now := s.now()
-	demo := s.demo
-	s.mu.Unlock()
-	status := "degraded"
-	if demo {
-		status = "connected"
+	s.initWarehouse()
+	var out []warehouse.WarehouseConnector
+	if s.warehouseEngine != nil {
+		out = append(out, warehouse.WarehouseConnector{
+			ID:       "duckdb-embedded",
+			Name:     "Embedded DuckDB Lakehouse Engine",
+			Type:     "duckdb_embedded",
+			Endpoint: "local://in-process",
+			Status:   s.warehouseEngine.Status(),
+		})
 	}
-
-	return []warehouse.WarehouseConnector{
-		{
-			ID:               "duckdb-embedded",
-			Name:             "Embedded DuckDB Lakehouse Engine",
-			Type:             "duckdb_embedded",
-			Endpoint:         "local://in-process (R2 / NVMe Parquet Reader)",
-			DatabaseName:     "lakehouse_main",
-			Status:           status,
-			LatencyMs:        1,
-			AutoSync:         true,
-			SyncIntervalMins: 15,
-			LastSyncAt:       now.Add(-5 * time.Minute),
-			CreatedAt:        now.Add(-30 * 24 * time.Hour),
-		},
-		{
-			ID:               "clickhouse-local",
-			Name:             "ClickHouse Distributed Cluster",
-			Type:             "clickhouse",
-			Endpoint:         "http://127.0.0.1:8123",
-			DatabaseName:     "dbvault_warehouse",
-			Status:           "degraded",
-			LatencyMs:        14,
-			AutoSync:         true,
-			SyncIntervalMins: 60,
-			LastSyncAt:       now.Add(-12 * time.Minute),
-			CreatedAt:        now.Add(-14 * 24 * time.Hour),
-		},
-	}
+	return out
 }
 
 // ExportWarehouseResults generates a downloadable CSV / JSON / Parquet export of query results.

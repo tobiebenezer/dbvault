@@ -54,28 +54,38 @@ export function WarehousePage() {
   const [queryHistory, setQueryHistory] = useState([]);
 
   const loadData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const [cat, conn, inv] = await Promise.all([
-        API.warehouseCatalog().catch(() => ({ databases: [], total_tables: 0, total_rows: 0, total_parquet_bytes: 0, total_raw_bytes: 0, overall_compression_ratio: 5.2 })),
-        API.warehouseConnectors().catch(() => ({ connectors: [] })),
-        API.inventory().catch(() => ({ databases: [] }))
-      ]);
-      setCatalog(cat || {});
-      setConnectors((conn && conn.connectors) ? conn.connectors : []);
-
-      const liveDbs = ((inv && inv.databases) ? inv.databases : []).map(db => ({
+    setLoading(true);
+    setError(null);
+    // Surface failures instead of masking them with plausible-looking defaults.
+    const [catRes, connRes, invRes] = await Promise.allSettled([
+      API.warehouseCatalog(),
+      API.warehouseConnectors(),
+      API.inventory()
+    ]);
+    const failures = [];
+    if (catRes.status === 'fulfilled') {
+      setCatalog(catRes.value || {});
+    } else {
+      setCatalog(null);
+      failures.push(`catalog: ${catRes.reason?.message || 'request failed'}`);
+    }
+    if (connRes.status === 'fulfilled') {
+      setConnectors((connRes.value && connRes.value.connectors) ? connRes.value.connectors : []);
+    } else {
+      failures.push(`connectors: ${connRes.reason?.message || 'request failed'}`);
+    }
+    if (invRes.status === 'fulfilled') {
+      const liveDbs = ((invRes.value && invRes.value.databases) ? invRes.value.databases : []).map(db => ({
         id: db.id || db.name,
         name: db.name,
         engine: db.engine || 'postgres'
       }));
       setDatabases(liveDbs);
-      setLoading(false);
-    } catch (err) {
-      setError(err);
-      setLoading(false);
+    } else {
+      failures.push(`inventory: ${invRes.reason?.message || 'request failed'}`);
     }
+    setError(failures.length ? new Error(`Could not load warehouse data — ${failures.join('; ')}`) : null);
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -186,13 +196,15 @@ export function WarehousePage() {
     return <div className="page"><LoadingState label="Connecting to analytical data lakehouse…" /></div>;
   }
 
-  const compressionRatio = Number(catalog?.overall_compression_ratio || 5.2).toFixed(1);
+  const overallRatio = catalog?.overall_compression_ratio;
+  const compressionRatio = overallRatio > 0 ? Number(overallRatio).toFixed(1) : null;
+  const engineConnector = Array.isArray(connectors) ? connectors.find((c) => c.type === 'duckdb_embedded') : null;
 
   return (
     <div className="page">
       <PageHeader
         title="Data Warehouse & Analytics"
-        description="High-performance OLAP query engine, Apache Parquet lakehouse, and live multi-database analytical workbench."
+        description="Analytical SQL workbench over Apache Parquet datasets extracted from your configured databases."
         actions={[
           <Button key="bi" label="Connect BI Tool" onClick={() => setActiveTab('powerbi')} tone="primary" icon="link" />,
           <Button key="sync" label="Sync Datasets" onClick={() => handleTriggerSync('')} tone="secondary" icon="refresh" />,
@@ -204,25 +216,24 @@ export function WarehousePage() {
       <div className="metric-grid">
         <MetricCard
           label="Warehouse Engine"
-          value="DuckDB + Parquet"
-          footerText="Zero-copy columnar execution"
-          statusTone="success"
+          value={engineConnector ? (engineConnector.status === 'available' ? 'DuckDB / SQLite CLI' : 'No query engine found') : 'Unknown'}
+          footerText={engineConnector ? `Detected status: ${engineConnector.status}` : 'Connector status unavailable'}
+          statusTone={engineConnector?.status === 'available' ? 'success' : 'warning'}
         />
         <MetricCard
           label="Parquet Lakehouse Volume"
           value={formatBytes(catalog?.total_parquet_bytes || 0)}
-          footerText={`Raw: ${formatBytes(catalog?.total_raw_bytes || 0)} (${compressionRatio}x saved)`}
+          footerText={`Raw: ${formatBytes(catalog?.total_raw_bytes || 0)}${compressionRatio ? ` (${compressionRatio}x saved)` : ' — no compression ratio measured yet'}`}
         />
         <MetricCard
           label="Indexed Tables"
           value={`${catalog?.total_tables || 0} Tables`}
-          footerText={`${Number(catalog?.total_rows || 0).toLocaleString()} records scanned`}
+          footerText={`${Number(catalog?.total_rows || 0).toLocaleString()} records reported by sources`}
         />
         <MetricCard
           label="Query Latency"
-          value={queryResult ? `${queryResult.execution_ms || 1}ms` : '< 5ms'}
-          footerText="Sub-millisecond OLAP response"
-          statusTone="success"
+          value={queryResult ? `${queryResult.execution_ms || 0}ms` : 'Not measured'}
+          footerText={queryResult ? `Measured on last query (${queryResult.engine || 'engine'})` : 'Run a query to measure'}
         />
       </div>
 
@@ -614,7 +625,7 @@ export function WarehousePage() {
                   <div className="row-between mb-sm">
                     <div>
                       <h3 style={{ margin: 0, fontSize: '15px' }}>{db.name}</h3>
-                      <span className="text-xs text-muted">Engine: {db.engine_source || 'SQL'} · Total Volume: {formatBytes(db.total_parquet_bytes || 0)} ({Number(db.compression_ratio || 5.2).toFixed(1)}x saved)</span>
+                      <span className="text-xs text-muted">Engine: {db.engine_source || 'SQL'} · Total Volume: {formatBytes(db.total_parquet_bytes || 0)}{db.compression_ratio > 0 ? ` (${Number(db.compression_ratio).toFixed(1)}x saved)` : ''}</span>
                     </div>
                     <Button
                       label="Sync Table Parquet"
@@ -641,12 +652,12 @@ export function WarehousePage() {
                         <tr key={t.name}>
                           <td className="cell-primary"><strong><code>{t.name}</code></strong></td>
                           <td className="text-xs text-muted" style={{ maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={colNames}>
-                            {colNames || 'id, payload'}
+                            {colNames || '—'}
                           </td>
                           <td className="cell-mono text-xs">{Number(t.row_count || 0).toLocaleString()} rows</td>
                           <td className="cell-mono text-xs"><strong className="text-primary">{formatBytes(t.parquet_size_bytes || 0)}</strong></td>
-                          <td className="cell-mono text-xs">{formatBytes(t.uncompressed_bytes || 0)}</td>
-                          <td><Badge label={`${Number(t.compression_ratio || 5.2).toFixed(1)}x`} tone="success" /></td>
+                          <td className="cell-mono text-xs">{t.uncompressed_bytes > 0 ? formatBytes(t.uncompressed_bytes) : '—'}</td>
+                          <td>{t.compression_ratio > 0 ? <Badge label={`${Number(t.compression_ratio).toFixed(1)}x`} tone="success" /> : <span className="text-xs text-muted">not measured</span>}</td>
                           <td className="cell-actions">
                             <Button
                               label="Query Table"

@@ -34,45 +34,50 @@ type QueryResult struct {
 
 // TableDataset represents a columnar Parquet dataset in the lakehouse.
 type TableDataset struct {
-	Name                string       `json:"name"`
-	Database            string       `json:"database"`
-	EngineSource        string       `json:"engine_source"`
-	Columns             []ColumnMeta `json:"columns"`
-	RowCount            int64        `json:"row_count"`
-	ParquetSizeBytes    int64        `json:"parquet_size_bytes"`
-	UncompressedBytes   int64        `json:"uncompressed_bytes"`
-	CompressionRatio    float64      `json:"compression_ratio"`
-	ParquetLocation     string       `json:"parquet_location"`
-	PartitionKey        string       `json:"partition_key,omitempty"`
-	PartitionCount      int          `json:"partition_count"`
-	LastSyncedAt        time.Time    `json:"last_synced_at"`
-	SyncStatus          string       `json:"sync_status"` // "synced", "syncing", "pending"
+	Name              string       `json:"name"`
+	Database          string       `json:"database"`
+	EngineSource      string       `json:"engine_source"`
+	Columns           []ColumnMeta `json:"columns"`
+	RowCount          int64        `json:"row_count"`
+	ParquetSizeBytes  int64        `json:"parquet_size_bytes"`
+	UncompressedBytes int64        `json:"uncompressed_bytes"`
+	// CompressionRatio is computed only from actually measured bytes
+	// (raw extraction bytes vs written Parquet file size). It is omitted
+	// entirely when either measurement is missing.
+	CompressionRatio  float64      `json:"compression_ratio,omitempty"`
+	ParquetLocation   string       `json:"parquet_location"`
+	PartitionKey      string       `json:"partition_key,omitempty"`
+	PartitionCount    int          `json:"partition_count"`
+	LastSyncedAt      time.Time    `json:"last_synced_at"`
+	SyncStatus        string       `json:"sync_status"` // "synced", "never_synced"
 }
 
 // DatabaseDataset represents a database namespace in the data warehouse.
 type DatabaseDataset struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	EngineSource        string         `json:"engine_source"`
-	Tables              []TableDataset `json:"tables"`
-	TotalRows           int64          `json:"total_rows"`
-	TotalParquetBytes   int64          `json:"total_parquet_bytes"`
-	TotalRawBytes       int64          `json:"total_raw_bytes"`
-	CompressionRatio    float64        `json:"compression_ratio"`
-	LastSyncAt          time.Time      `json:"last_sync_at"`
+	ID                string         `json:"id"`
+	Name              string         `json:"name"`
+	EngineSource      string         `json:"engine_source"`
+	Tables            []TableDataset `json:"tables"`
+	TotalRows         int64          `json:"total_rows"`
+	TotalParquetBytes int64          `json:"total_parquet_bytes"`
+	TotalRawBytes     int64          `json:"total_raw_bytes"`
+	CompressionRatio  float64        `json:"compression_ratio,omitempty"`
+	LastSyncAt        time.Time      `json:"last_sync_at"`
 }
 
 // WarehouseCatalog describes the entire analytical lakehouse storage.
 type WarehouseCatalog struct {
-	Databases              []DatabaseDataset `json:"databases"`
-	TotalDatabases         int               `json:"total_databases"`
-	TotalTables            int               `json:"total_tables"`
-	TotalRows              int64             `json:"total_rows"`
-	TotalParquetBytes      int64             `json:"total_parquet_bytes"`
-	TotalRawBytes          int64             `json:"total_raw_bytes"`
-	OverallCompressionRatio float64           `json:"overall_compression_ratio"`
-	StorageEngine          string            `json:"storage_engine"` // "Cloudflare R2 + Embedded DuckDB"
-	GeneratedAt            time.Time         `json:"generated_at"`
+	Databases         []DatabaseDataset `json:"databases"`
+	TotalDatabases    int               `json:"total_databases"`
+	TotalTables       int               `json:"total_tables"`
+	TotalRows         int64             `json:"total_rows"`
+	TotalParquetBytes int64             `json:"total_parquet_bytes"`
+	TotalRawBytes     int64             `json:"total_raw_bytes"`
+	// OverallCompressionRatio is computed only when both total byte counts
+	// were actually measured; otherwise the field is omitted from responses.
+	OverallCompressionRatio float64           `json:"overall_compression_ratio,omitempty"`
+	StorageEngine           string            `json:"storage_engine"`
+	GeneratedAt             time.Time         `json:"generated_at"`
 }
 
 // WarehouseConnector represents an external OLAP sync target (e.g. ClickHouse, Postgres-OLAP).

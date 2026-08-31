@@ -91,6 +91,7 @@ func (e *DuckDBEngine) ExecuteQuery(ctx context.Context, req QueryRequest) (*Que
 	}
 
 	// 1. If DuckDB CLI is present, attempt DuckDB execution
+	var lastErr error
 	if e.useDuckDBCLI {
 		res, err := e.executeViaDuckDBCLI(ctx, query)
 		if err == nil {
@@ -99,6 +100,7 @@ func (e *DuckDBEngine) ExecuteQuery(ctx context.Context, req QueryRequest) (*Que
 			res.Engine = "DuckDB 1.0 (Vectorized Columnar)"
 			return res, nil
 		}
+		lastErr = err
 	}
 
 	// 2. If SQLite3 CLI is present, execute via SQLite3 JSON mode
@@ -113,21 +115,14 @@ func (e *DuckDBEngine) ExecuteQuery(ctx context.Context, req QueryRequest) (*Que
 			res.Engine = "Embedded Columnar OLAP Engine (DuckDB Compatible)"
 			return res, nil
 		}
+		lastErr = err
 	}
 
-	// 3. Fallback to in-memory evaluator
-	res, err := e.executeInMemory(query)
-	if err != nil {
-		return nil, err
+	// 3. Fail closed: never return partial or wrong results labeled as success.
+	if lastErr != nil {
+		return nil, fmt.Errorf("warehouse query failed on all available engines: %w", lastErr)
 	}
-
-	res.ExecutionMs = time.Since(start).Milliseconds()
-	if res.ExecutionMs == 0 {
-		res.ExecutionMs = 1
-	}
-	res.ExecutedAt = time.Now().UTC()
-	res.Engine = "In-Memory Columnar Evaluator"
-	return res, nil
+	return nil, fmt.Errorf("no query engine available: install duckdb or sqlite3 CLI")
 }
 
 func (e *DuckDBEngine) executeViaDuckDBCLI(ctx context.Context, query string) (*QueryResult, error) {
@@ -247,29 +242,12 @@ func (e *DuckDBEngine) executeViaSQLiteCLI(ctx context.Context, query string) (*
 	}, nil
 }
 
-func (e *DuckDBEngine) executeInMemory(query string) (*QueryResult, error) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	// Extract table name from query
-	re := regexp.MustCompile(`(?i)FROM\s+([a-zA-Z0-9_]+)`)
-	matches := re.FindStringSubmatch(query)
-	if len(matches) < 2 {
-		return nil, fmt.Errorf("unable to identify source table in query: %s", query)
+// Status reports the query-engine availability actually detected on this host.
+func (e *DuckDBEngine) Status() string {
+	if e.useDuckDBCLI || e.sqlitePath != "" {
+		return "available"
 	}
-
-	tblName := matches[1]
-	tbl, ok := e.memoryStore[tblName]
-	if !ok {
-		return nil, fmt.Errorf("table %q not found in analytical warehouse memory", tblName)
-	}
-
-	return &QueryResult{
-		Columns:      tbl.Columns,
-		Rows:         tbl.Rows,
-		RowCount:     len(tbl.Rows),
-		BytesScanned: int64(len(tbl.Rows) * 128),
-	}, nil
+	return "unavailable"
 }
 
 // SeedDataset loads a tabular dataset into the warehouse storage for instant querying.
