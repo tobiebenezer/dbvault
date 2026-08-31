@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"sync"
 	"testing"
@@ -217,5 +218,91 @@ func TestJobForFireDeterministic(t *testing.T) {
 	a, b := JobForFire(spec, fire), JobForFire(spec, fire)
 	if a.ID != b.ID || a.ResourceID != "srcA" || a.Type != domain.JobBackup {
 		t.Fatalf("jobs not deterministic/complete: %+v %+v", a, b)
+	}
+}
+
+func TestSpecsFromConfigWarehouseSync(t *testing.T) {
+	enabled := true
+	cfg := config.Config{Schedules: []config.ScheduleConfig{{
+		ID: "wh-nightly", Source: "src1", Operation: "warehouse_sync", EverySeconds: 120, Enabled: &enabled,
+	}}}
+	specs := SpecsFromConfig(cfg)
+	if len(specs) != 1 {
+		t.Fatalf("specs=%d want 1", len(specs))
+	}
+	if specs[0].Operation != "warehouse_sync" || specs[0].EverySeconds != 120 || specs[0].SourceID != "src1" {
+		t.Fatalf("spec=%+v", specs[0])
+	}
+	off := false
+	cfg.Schedules[0].Enabled = &off
+	if specs := SpecsFromConfig(cfg); len(specs) != 0 {
+		t.Fatalf("disabled schedule produced %d specs", len(specs))
+	}
+}
+
+func TestSpecsFromConfigDefaultsOperationAndSkipsUntimed(t *testing.T) {
+	enabled := true
+	cfg := config.Config{Schedules: []config.ScheduleConfig{
+		{ID: "nightly", Source: "src1", Cron: "0 2 * * *", Enabled: &enabled},
+		{ID: "untimed", Source: "src2", Enabled: &enabled},
+	}}
+	specs := SpecsFromConfig(cfg)
+	if len(specs) != 1 {
+		t.Fatalf("specs=%d want 1 (untimed schedule must be skipped)", len(specs))
+	}
+	if specs[0].Operation != "logical_backup" {
+		t.Fatalf("default operation=%q want logical_backup", specs[0].Operation)
+	}
+}
+
+func TestJobForFireWarehouseSyncType(t *testing.T) {
+	fire := time.Date(2026, 8, 22, 2, 0, 0, 0, time.UTC)
+	job := JobForFire(Spec{ID: "wh-nightly", SourceID: "src1", Operation: "warehouse_sync"}, fire)
+	if job.Type != domain.JobWarehouseSync {
+		t.Fatalf("type=%s want warehouse_sync", job.Type)
+	}
+	if job.ResourceID != "src1" || job.Status != domain.JobPending {
+		t.Fatalf("job=%+v", job)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(job.PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["operation"] != "warehouse_sync" || payload["schedule"] != "wh-nightly" {
+		t.Fatalf("payload=%v", payload)
+	}
+	if JobForFire(Spec{ID: "b", SourceID: "s", Operation: "logical_backup"}, fire).Type != domain.JobBackup {
+		t.Fatal("logical_backup must map to JobBackup")
+	}
+	if JobForFire(Spec{ID: "d", SourceID: "s"}, fire).Type != domain.JobBackup {
+		t.Fatal("empty operation must default to JobBackup")
+	}
+}
+
+func TestSchedulerEnqueuesWarehouseSyncOnTick(t *testing.T) {
+	base := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
+	q := newFakeQueue()
+	s := New(Options{
+		Queue: q,
+		Specs: []Spec{{ID: "wh", SourceID: "src1", Operation: "warehouse_sync", EverySeconds: 60}},
+		Now:   func() time.Time { return base },
+	})
+	first := s.Tick(context.Background(), base)
+	if len(first) != 1 || first[0].Type != domain.JobWarehouseSync {
+		t.Fatalf("first tick=%+v", first)
+	}
+	if got := s.Tick(context.Background(), base.Add(30*time.Second)); len(got) != 0 {
+		t.Fatalf("same window re-fired: %+v", got)
+	}
+	s.Settle(domain.Job{ID: first[0].ID})
+	next := s.Tick(context.Background(), base.Add(61*time.Second))
+	if len(next) != 1 || next[0].Type != domain.JobWarehouseSync {
+		t.Fatalf("next window=%+v", next)
+	}
+	if next[0].ID == first[0].ID {
+		t.Fatal("distinct windows must produce distinct job IDs")
+	}
+	if q.enqDup != 0 {
+		t.Fatalf("duplicate enqueues=%d", q.enqDup)
 	}
 }
