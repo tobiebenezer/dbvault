@@ -32,14 +32,15 @@ type Catalogue struct {
 }
 
 type state struct {
-	Version   int                               `json:"version"`
-	Runs      map[string]domain.BackupRun       `json:"runs"`
-	Snapshots map[string]domain.Snapshot        `json:"snapshots"`
-	Links     map[string][]domain.SnapshotChunk `json:"links"`
-	Chunks    map[string]domain.Chunk           `json:"chunks"`
-	Audit     []AuditEvent                      `json:"audit"`
-	Leases    map[string]LeaseRecord            `json:"leases"`
-	UpdatedAt time.Time                         `json:"updated_at"`
+	Version           int                                `json:"version"`
+	Runs              map[string]domain.BackupRun        `json:"runs"`
+	Snapshots         map[string]domain.Snapshot         `json:"snapshots"`
+	Links             map[string][]domain.SnapshotChunk  `json:"links"`
+	Chunks            map[string]domain.Chunk            `json:"chunks"`
+	Audit             []AuditEvent                       `json:"audit"`
+	Leases            map[string]LeaseRecord             `json:"leases"`
+	WarehouseDatasets map[string]domain.WarehouseDataset `json:"warehouse_datasets,omitempty"`
+	UpdatedAt         time.Time                          `json:"updated_at"`
 }
 
 type AuditEvent struct {
@@ -84,7 +85,7 @@ func Open(path string) (*Catalogue, error) {
 }
 
 func newState() state {
-	return state{Version: 2, Runs: map[string]domain.BackupRun{}, Snapshots: map[string]domain.Snapshot{}, Links: map[string][]domain.SnapshotChunk{}, Chunks: map[string]domain.Chunk{}, Leases: map[string]LeaseRecord{}, Audit: []AuditEvent{}, UpdatedAt: time.Now().UTC()}
+	return state{Version: 2, Runs: map[string]domain.BackupRun{}, Snapshots: map[string]domain.Snapshot{}, Links: map[string][]domain.SnapshotChunk{}, Chunks: map[string]domain.Chunk{}, Leases: map[string]LeaseRecord{}, Audit: []AuditEvent{}, WarehouseDatasets: map[string]domain.WarehouseDataset{}, UpdatedAt: time.Now().UTC()}
 }
 func (c *Catalogue) ensureMaps() {
 	if c.db.Runs == nil {
@@ -101,6 +102,9 @@ func (c *Catalogue) ensureMaps() {
 	}
 	if c.db.Leases == nil {
 		c.db.Leases = map[string]LeaseRecord{}
+	}
+	if c.db.WarehouseDatasets == nil {
+		c.db.WarehouseDatasets = map[string]domain.WarehouseDataset{}
 	}
 }
 func (c *Catalogue) Close() error { return nil }
@@ -224,6 +228,33 @@ func (c *Catalogue) DeleteLease(ctx context.Context, resource string) error {
 	defer c.mu.Unlock()
 	delete(c.db.Leases, resource)
 	return c.flushLocked()
+}
+
+func (c *Catalogue) UpsertWarehouseDataset(ctx context.Context, ds domain.WarehouseDataset) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.db.WarehouseDatasets[domain.WarehouseDatasetKey(ds.DatabaseID, ds.DatasetName)] = ds
+	return c.flushLocked()
+}
+
+func (c *Catalogue) GetWarehouseDataset(ctx context.Context, databaseID, datasetName string) (domain.WarehouseDataset, bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ds, ok := c.db.WarehouseDatasets[domain.WarehouseDatasetKey(databaseID, datasetName)]
+	return ds, ok, nil
+}
+
+func (c *Catalogue) ListWarehouseDatasets(ctx context.Context, databaseID string) ([]domain.WarehouseDataset, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := []domain.WarehouseDataset{}
+	for _, ds := range c.db.WarehouseDatasets {
+		if databaseID == "" || ds.DatabaseID == databaseID {
+			out = append(out, ds)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSyncAt.After(out[j].LastSyncAt) })
+	return out, nil
 }
 func max64(a, b int64) int64 {
 	if a > b {

@@ -37,7 +37,7 @@ func TestEnqueueWarehouseSyncSurvivesQueueReopen(t *testing.T) {
 		t.Fatalf("queue open: %v", err)
 	}
 	svc.SetJobQueue(q)
-	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-reopen")
+	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-reopen", WarehouseSyncOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestEnqueueWarehouseSyncFailClosedWithoutQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.EnqueueWarehouseSync(context.Background(), "db-noqueue"); err == nil || !strings.Contains(err.Error(), "durable scheduler not configured") {
+	if _, err := svc.EnqueueWarehouseSync(context.Background(), "db-noqueue", WarehouseSyncOptions{}); err == nil || !strings.Contains(err.Error(), "durable scheduler not configured") {
 		t.Fatalf("expected fail-closed error, got %v", err)
 	}
 	jobs := svc.Jobs(nil)
@@ -100,7 +100,7 @@ func TestExecuteWarehouseSyncJobLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ran []string
-	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string) error {
+	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 		ran = append(ran, databaseID)
 		return nil
 	}
@@ -134,7 +134,7 @@ func TestExecuteWarehouseSyncJobFailureFailsRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string) error {
+	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 		return errors.New("extract boom")
 	}
 	view := svc.newJobRecord("warehouse_sync", "db-fail", "db-fail")
@@ -159,7 +159,7 @@ func TestExecuteWarehouseSyncJobRecreatesRecordAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string) error { return nil }
+	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error { return nil }
 	payload, _ := json.Marshal(map[string]string{"source": "db-sched", "operation": "warehouse_sync", "schedule": "wh-nightly"})
 	result, err := svc.ExecuteWarehouseSyncJob(context.Background(), domain.Job{ID: "sched-wh-nightly-1", Type: domain.JobWarehouseSync, ResourceID: "db-sched", PayloadJSON: payload})
 	if err != nil {
@@ -185,13 +185,13 @@ func TestWorkerPoolExecutesWarehouseSyncEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := make(chan string, 4)
-	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string) error {
+	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 		executed <- databaseID
 		return nil
 	}
 	q := openDurableQueue(t)
 	svc.SetJobQueue(q)
-	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-e2e")
+	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-e2e", WarehouseSyncOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -236,14 +236,14 @@ func TestWarehouseSyncJobRecoveredAfterLeaseCrash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string) error { return nil }
+	svc.warehouseSyncRunner = func(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error { return nil }
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	q, err := jobqueue.Open(path)
 	if err != nil {
 		t.Fatalf("queue open: %v", err)
 	}
 	svc.SetJobQueue(q)
-	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-crash")
+	view, err := svc.EnqueueWarehouseSync(context.Background(), "db-crash", WarehouseSyncOptions{})
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}

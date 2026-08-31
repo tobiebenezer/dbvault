@@ -50,6 +50,13 @@ type TableDataset struct {
 	PartitionCount    int          `json:"partition_count"`
 	LastSyncedAt      time.Time    `json:"last_synced_at"`
 	SyncStatus        string       `json:"sync_status"` // "synced", "never_synced"
+	// Watermark state and schema provenance, populated only from
+	// catalogue-backed sync evidence (W3). Empty/false means the dataset has
+	// no incremental configuration or no verified schema on record.
+	WatermarkColumn    string `json:"watermark_column,omitempty"`
+	LastWatermarkValue string `json:"last_watermark_value,omitempty"`
+	LastSyncMode       string `json:"last_sync_mode,omitempty"` // "full", "incremental"
+	SchemaVerified     bool   `json:"schema_verified,omitempty"`
 }
 
 // DatabaseDataset represents a database namespace in the data warehouse.

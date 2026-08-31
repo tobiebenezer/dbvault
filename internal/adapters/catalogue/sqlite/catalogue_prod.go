@@ -80,6 +80,26 @@ func (c *Catalogue) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS chunks(repository_id TEXT NOT NULL, id TEXT NOT NULL, object_key TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(repository_id, id));`,
 		`CREATE TABLE IF NOT EXISTS leases(resource TEXT PRIMARY KEY, owner_id TEXT NOT NULL, acquired_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, json TEXT NOT NULL);`,
 		`CREATE TABLE IF NOT EXISTS audit_events(id TEXT PRIMARY KEY, event_type TEXT NOT NULL, resource TEXT, json TEXT NOT NULL, created_at TEXT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS warehouse_datasets(
+			id TEXT PRIMARY KEY,
+			database_id TEXT NOT NULL,
+			dataset_name TEXT NOT NULL,
+			source_engine TEXT NOT NULL DEFAULT '',
+			watermark_column TEXT NOT NULL DEFAULT '',
+			watermark_type TEXT NOT NULL DEFAULT '',
+			last_watermark_value TEXT NOT NULL DEFAULT '',
+			last_sync_mode TEXT NOT NULL DEFAULT '',
+			columns_json TEXT NOT NULL DEFAULT '[]',
+			row_count INTEGER NOT NULL DEFAULT 0,
+			bytes_raw INTEGER NOT NULL DEFAULT 0,
+			bytes_parquet INTEGER NOT NULL DEFAULT 0,
+			parquet_paths_json TEXT NOT NULL DEFAULT '[]',
+			schema_verified INTEGER NOT NULL DEFAULT 0,
+			last_sync_at TEXT NOT NULL DEFAULT '',
+			last_sync_status TEXT NOT NULL DEFAULT '',
+			UNIQUE(database_id, dataset_name)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_wh_datasets_db ON warehouse_datasets(database_id);`,
 	}
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -258,6 +278,123 @@ func (c *Catalogue) GetLease(ctx context.Context, resource string) (LeaseRecord,
 func (c *Catalogue) DeleteLease(ctx context.Context, resource string) error {
 	_, err := c.db.ExecContext(ctx, `DELETE FROM leases WHERE resource=?`, resource)
 	return err
+}
+
+func (c *Catalogue) UpsertWarehouseDataset(ctx context.Context, ds domain.WarehouseDataset) error {
+	cols, err := json.Marshal(ds.Columns)
+	if err != nil {
+		return err
+	}
+	paths, err := json.Marshal(ds.ParquetPaths)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.ExecContext(ctx, `INSERT INTO warehouse_datasets(
+			id, database_id, dataset_name, source_engine, watermark_column, watermark_type,
+			last_watermark_value, last_sync_mode, columns_json, row_count, bytes_raw, bytes_parquet,
+			parquet_paths_json, schema_verified, last_sync_at, last_sync_status)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(database_id, dataset_name) DO UPDATE SET
+			source_engine=excluded.source_engine,
+			watermark_column=excluded.watermark_column,
+			watermark_type=excluded.watermark_type,
+			last_watermark_value=excluded.last_watermark_value,
+			last_sync_mode=excluded.last_sync_mode,
+			columns_json=excluded.columns_json,
+			row_count=excluded.row_count,
+			bytes_raw=excluded.bytes_raw,
+			bytes_parquet=excluded.bytes_parquet,
+			parquet_paths_json=excluded.parquet_paths_json,
+			schema_verified=excluded.schema_verified,
+			last_sync_at=excluded.last_sync_at,
+			last_sync_status=excluded.last_sync_status`,
+		domain.WarehouseDatasetKey(ds.DatabaseID, ds.DatasetName), ds.DatabaseID, ds.DatasetName, ds.SourceEngine,
+		ds.WatermarkColumn, ds.WatermarkType, ds.LastWatermarkValue, ds.LastSyncMode,
+		string(cols), ds.RowCount, ds.BytesRaw, ds.BytesParquet, string(paths),
+		boolToInt(ds.SchemaVerified), ds.LastSyncAt.UTC().Format(time.RFC3339Nano), ds.LastSyncStatus)
+	return err
+}
+
+func (c *Catalogue) GetWarehouseDataset(ctx context.Context, databaseID, datasetName string) (domain.WarehouseDataset, bool, error) {
+	row := c.db.QueryRowContext(ctx, `SELECT
+			database_id, dataset_name, source_engine, watermark_column, watermark_type,
+			last_watermark_value, last_sync_mode, columns_json, row_count, bytes_raw, bytes_parquet,
+			parquet_paths_json, schema_verified, last_sync_at, last_sync_status
+		FROM warehouse_datasets WHERE database_id=? AND dataset_name=?`, databaseID, datasetName)
+	ds, err := scanWarehouseDataset(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.WarehouseDataset{}, false, nil
+	}
+	if err != nil {
+		return domain.WarehouseDataset{}, false, err
+	}
+	return ds, true, nil
+}
+
+func (c *Catalogue) ListWarehouseDatasets(ctx context.Context, databaseID string) ([]domain.WarehouseDataset, error) {
+	q := `SELECT
+			database_id, dataset_name, source_engine, watermark_column, watermark_type,
+			last_watermark_value, last_sync_mode, columns_json, row_count, bytes_raw, bytes_parquet,
+			parquet_paths_json, schema_verified, last_sync_at, last_sync_status
+		FROM warehouse_datasets`
+	args := []any{}
+	if databaseID != "" {
+		q += ` WHERE database_id=?`
+		args = append(args, databaseID)
+	}
+	q += ` ORDER BY last_sync_at DESC`
+	rows, err := c.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.WarehouseDataset{}
+	for rows.Next() {
+		ds, err := scanWarehouseDataset(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ds)
+	}
+	return out, rows.Err()
+}
+
+func scanWarehouseDataset(scan func(dest ...any) error) (domain.WarehouseDataset, error) {
+	var ds domain.WarehouseDataset
+	var colsJSON, pathsJSON, lastSyncAt string
+	var verified int
+	if err := scan(&ds.DatabaseID, &ds.DatasetName, &ds.SourceEngine, &ds.WatermarkColumn, &ds.WatermarkType,
+		&ds.LastWatermarkValue, &ds.LastSyncMode, &colsJSON, &ds.RowCount, &ds.BytesRaw, &ds.BytesParquet,
+		&pathsJSON, &verified, &lastSyncAt, &ds.LastSyncStatus); err != nil {
+		return domain.WarehouseDataset{}, err
+	}
+	ds.ID = domain.WarehouseDatasetKey(ds.DatabaseID, ds.DatasetName)
+	ds.SchemaVerified = verified != 0
+	if lastSyncAt != "" {
+		if t, err := time.Parse(time.RFC3339Nano, lastSyncAt); err == nil {
+			ds.LastSyncAt = t
+		}
+	}
+	if err := json.Unmarshal([]byte(colsJSON), &ds.Columns); err != nil {
+		return domain.WarehouseDataset{}, err
+	}
+	if err := json.Unmarshal([]byte(pathsJSON), &ds.ParquetPaths); err != nil {
+		return domain.WarehouseDataset{}, err
+	}
+	if ds.Columns == nil {
+		ds.Columns = []domain.WarehouseColumn{}
+	}
+	if ds.ParquetPaths == nil {
+		ds.ParquetPaths = []string{}
+	}
+	return ds, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 func max64(a, b int64) int64 {
 	if a > b {

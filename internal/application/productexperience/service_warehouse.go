@@ -55,6 +55,12 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 	now := s.now()
 	s.mu.Unlock()
 
+	// Catalogue-backed sync evidence (W3): real schema, measured counts and
+	// byte sizes recorded by the sync pipeline. Inventory rows with evidence
+	// serve the stored record; datasets with evidence but no inventory row
+	// still appear because they exist as written Parquet artifacts.
+	evidenceByDB, evidenceByKey := s.warehouseEvidenceIndex(ctx)
+
 	var dbDatasets []warehouse.DatabaseDataset
 	var totalRows int64
 	var totalParquet int64
@@ -102,10 +108,38 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 					tblDataset.PartitionCount = 1
 					tblDataset.LastSyncedAt = info.ModTime().UTC()
 					tblDataset.SyncStatus = "synced"
-					dbDataset.LastSyncAt = tblDataset.LastSyncedAt
 				}
 			}
+			// Stored sync evidence replaces filesystem guesses when present.
+			if ev, ok := evidenceByKey[db.ID+"\x00"+t.Name]; ok {
+				tblDataset = evidenceTableDataset(tblDataset, ev)
+			}
+			if tblDataset.LastSyncedAt.After(dbDataset.LastSyncAt) {
+				dbDataset.LastSyncAt = tblDataset.LastSyncedAt
+			}
 
+			dbDataset.Tables = append(dbDataset.Tables, tblDataset)
+			dbDataset.TotalRows += tblDataset.RowCount
+			dbDataset.TotalParquetBytes += tblDataset.ParquetSizeBytes
+			dbDataset.TotalRawBytes += tblDataset.UncompressedBytes
+			totalTables++
+		}
+
+		// Evidence for tables this database no longer reports in inventory:
+		// the Parquet artifacts exist, so the catalog keeps telling the truth.
+		for _, ev := range evidenceByDB[db.ID] {
+			if dbHasTable(dbDataset.Tables, ev.DatasetName) {
+				continue
+			}
+			tblDataset := evidenceTableDataset(warehouse.TableDataset{
+				Name:         ev.DatasetName,
+				Database:     ev.DatabaseName,
+				EngineSource: ev.SourceEngine,
+				SyncStatus:   "never_synced",
+			}, ev)
+			if tblDataset.LastSyncedAt.After(dbDataset.LastSyncAt) {
+				dbDataset.LastSyncAt = tblDataset.LastSyncedAt
+			}
 			dbDataset.Tables = append(dbDataset.Tables, tblDataset)
 			dbDataset.TotalRows += tblDataset.RowCount
 			dbDataset.TotalParquetBytes += tblDataset.ParquetSizeBytes
@@ -122,6 +156,42 @@ func (s *Service) GetWarehouseCatalog(ctx context.Context) warehouse.WarehouseCa
 		totalParquet += dbDataset.TotalParquetBytes
 		totalRaw += dbDataset.TotalRawBytes
 
+		dbDatasets = append(dbDatasets, dbDataset)
+	}
+
+	// Evidence datasets belonging to databases that are no longer in the
+	// inventory at all.
+	covered := map[string]bool{}
+	for _, db := range dbDatasets {
+		covered[db.ID] = true
+	}
+	for dbID, evs := range evidenceByDB {
+		if covered[dbID] {
+			continue
+		}
+		dbDataset := warehouse.DatabaseDataset{ID: dbID, Name: dbID, EngineSource: dbID}
+		for _, ev := range evs {
+			tblDataset := evidenceTableDataset(warehouse.TableDataset{
+				Name:         ev.DatasetName,
+				Database:     ev.DatabaseName,
+				EngineSource: ev.SourceEngine,
+				SyncStatus:   "never_synced",
+			}, ev)
+			dbDataset.Tables = append(dbDataset.Tables, tblDataset)
+			dbDataset.TotalRows += tblDataset.RowCount
+			dbDataset.TotalParquetBytes += tblDataset.ParquetSizeBytes
+			dbDataset.TotalRawBytes += tblDataset.UncompressedBytes
+			totalTables++
+			if tblDataset.LastSyncedAt.After(dbDataset.LastSyncAt) {
+				dbDataset.LastSyncAt = tblDataset.LastSyncedAt
+			}
+		}
+		if dbDataset.TotalParquetBytes > 0 && dbDataset.TotalRawBytes > 0 {
+			dbDataset.CompressionRatio = float64(dbDataset.TotalRawBytes) / float64(dbDataset.TotalParquetBytes)
+		}
+		totalRows += dbDataset.TotalRows
+		totalParquet += dbDataset.TotalParquetBytes
+		totalRaw += dbDataset.TotalRawBytes
 		dbDatasets = append(dbDatasets, dbDataset)
 	}
 
@@ -214,23 +284,40 @@ func (s *Service) warehouseParquetPath(database, table string) string {
 	return filepath.Join(s.root, "lakehouse", "db="+database, "tbl="+table, "data.parquet")
 }
 
-// SyncWarehouse extracts source tables and writes verified Parquet artifacts.
-// It fails closed when the analytical runtime or source data is unavailable.
-func (s *Service) SyncWarehouse(ctx context.Context, databaseID string) error {
+// WarehouseSyncOptions carries caller intent for one warehouse sync run.
+type WarehouseSyncOptions struct {
+	// Incremental asks for watermark-based append syncs where the catalogue
+	// holds a previous watermark for the dataset; without one the sync falls
+	// back to a full refresh and records that fact.
+	Incremental     bool   `json:"incremental,omitempty"`
+	WatermarkColumn string `json:"watermark_column,omitempty"`
+}
+
+// SyncWarehouse extracts source tables and writes verified Parquet artifacts,
+// persisting per-dataset sync evidence (on-disk schema, measured row counts
+// and byte sizes, watermark state) in the catalogue. It fails closed when the
+// analytical runtime or source data is unavailable.
+func (s *Service) SyncWarehouse(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 	if err := s.ValidateWarehouseSync(ctx, databaseID); err != nil {
 		return err
 	}
 	s.initWarehouse()
 	s.mu.Lock()
 	ids := make([]string, 0)
-	if databaseID == "" || databaseID == "all-databases" {
-		for id := range s.customDatabases {
+	dbNames := map[string]string{}
+	dbEngines := map[string]string{}
+	for id, db := range s.customDatabases {
+		dbNames[id] = db.Name
+		dbEngines[id] = db.Engine
+		if databaseID == "" || databaseID == "all-databases" {
 			ids = append(ids, id)
 		}
-	} else {
+	}
+	if databaseID != "" && databaseID != "all-databases" {
 		ids = append(ids, databaseID)
 	}
 	s.mu.Unlock()
+	sort.Strings(ids)
 	duckdbPath, _ := exec.LookPath("duckdb")
 	for _, id := range ids {
 		schema := s.DatabaseSchema(id)
@@ -238,32 +325,353 @@ func (s *Service) SyncWarehouse(ctx context.Context, databaseID string) error {
 			if table.Excluded || !biIdentifier.MatchString(table.Name) {
 				continue
 			}
-			result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: id, Query: "SELECT * FROM " + table.Name})
-			if err != nil {
-				return fmt.Errorf("extract %s.%s: %w", id, table.Name, err)
-			}
-			if len(result.Columns) == 0 {
-				return fmt.Errorf("extract %s.%s returned no column metadata", id, table.Name)
-			}
-			if err := s.warehouseEngine.SeedDataset(table.Name, result.Columns, result.Rows); err != nil {
-				return fmt.Errorf("materialize %s.%s: %w", id, table.Name, err)
-			}
-			path := s.warehouseParquetPath(id, table.Name)
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			if err := s.syncWarehouseTable(ctx, duckdbPath, id, dbNames[id], dbEngines[id], table.Name, opts); err != nil {
 				return err
-			}
-			if err := s.writeWarehouseParquet(ctx, duckdbPath, path, result); err != nil {
-				return fmt.Errorf("write %s.%s: %w", id, table.Name, err)
 			}
 		}
 	}
 	return nil
 }
 
-func (s *Service) writeWarehouseParquet(ctx context.Context, duckdbPath, path string, result *warehouse.QueryResult) error {
-	tmp, err := os.CreateTemp(filepath.Join(s.root, "lakehouse"), "extract-*.csv")
+// syncWarehouseTable extracts one source table, writes its Parquet artifact
+// (full refresh or watermark-based append) and records the resulting evidence.
+func (s *Service) syncWarehouseTable(ctx context.Context, duckdbPath, databaseID, databaseName, engine, tableName string, opts WarehouseSyncOptions) error {
+	now := s.now()
+	prev, _, _ := s.getWarehouseEvidence(ctx, databaseID, tableName)
+
+	mode, watermarkColumn, lastWatermark, err := resolveWarehouseSyncMode(opts, prev)
 	if err != nil {
 		return err
+	}
+	query := buildWarehouseExtractQuery(tableName, mode, watermarkColumn, lastWatermark)
+	result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: databaseID, Query: query})
+	if err != nil {
+		return fmt.Errorf("extract %s.%s: %w", databaseID, tableName, err)
+	}
+	if len(result.Columns) == 0 {
+		return fmt.Errorf("extract %s.%s returned no column metadata", databaseID, tableName)
+	}
+	if mode == "incremental" && len(result.Rows) == 0 {
+		// Nothing new since the recorded watermark: the honest outcome is a
+		// no-op that keeps every previous measurement and only records that
+		// this sync ran and found no changes.
+		updated := *prev
+		updated.LastSyncMode = mode
+		updated.LastSyncAt = now
+		return s.upsertWarehouseEvidence(ctx, updated)
+	}
+	if mode == "full" && watermarkColumn == "" {
+		watermarkColumn = detectWatermarkColumn(result.Columns)
+	}
+
+	// Full refreshes materialize the extraction into the embedded engine.
+	// Incremental appends deliberately do not: the embedded view would then
+	// show only the delta, which misrepresents the dataset.
+	if mode == "full" {
+		if err := s.warehouseEngine.SeedDataset(tableName, result.Columns, result.Rows); err != nil {
+			return fmt.Errorf("materialize %s.%s: %w", databaseID, tableName, err)
+		}
+	}
+
+	wmType := classifyWatermarkType(result.Columns, watermarkColumn)
+	dir := filepath.Join(s.root, "lakehouse", "db="+databaseID, "tbl="+tableName)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "data.parquet")
+	if mode == "incremental" {
+		name := fmt.Sprintf("part-%d.parquet", now.UnixNano())
+		if wmType == "date" {
+			// Date-typed watermarks partition by sync day: each incremental
+			// append lands in its own dt=<YYYY-MM-DD> directory so queries can
+			// prune partitions and duplicate days resolve newest-wins.
+			name = filepath.Join("dt="+now.UTC().Format("2006-01-02"), name)
+		}
+		path = filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return err
+		}
+	}
+	rawBytes, err := s.writeWarehouseParquet(ctx, duckdbPath, path, result)
+	if err != nil {
+		return fmt.Errorf("write %s.%s: %w", databaseID, tableName, err)
+	}
+	parquetInfo, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("verify %s.%s: %w", databaseID, tableName, err)
+	}
+
+	verifiedColumns, fileRows, verifyErr := inspectParquet(duckdbPath, path)
+	schemaVerified := verifyErr == nil && fileRows == int64(len(result.Rows)) && parquetColumnsMatch(verifiedColumns, result.Columns)
+	if len(verifiedColumns) == 0 {
+		verifiedColumns = columnsFromResult(result.Columns)
+	}
+
+	newWatermark := lastWatermark
+	if idx := columnIndex(result.Columns, watermarkColumn); idx >= 0 {
+		for _, row := range result.Rows {
+			if idx >= len(row) || row[idx] == nil {
+				continue
+			}
+			v := normalizeWatermarkValue(row[idx])
+			if newWatermark == "" || watermarkGreater(v, newWatermark, wmType) {
+				newWatermark = v
+			}
+		}
+	}
+
+	ds := domain.WarehouseDataset{
+		ID:                 domain.WarehouseDatasetKey(databaseID, tableName),
+		DatabaseID:         databaseID,
+		DatabaseName:       databaseName,
+		DatasetName:        tableName,
+		SourceEngine:       engine,
+		WatermarkColumn:    watermarkColumn,
+		WatermarkType:      wmType,
+		LastWatermarkValue: newWatermark,
+		LastSyncMode:       mode,
+		Columns:            verifiedColumns,
+		RowCount:           int64(len(result.Rows)),
+		BytesRaw:           rawBytes,
+		BytesParquet:       parquetInfo.Size(),
+		ParquetPaths:       []string{path},
+		SchemaVerified:     schemaVerified,
+		LastSyncAt:         now,
+		LastSyncStatus:     "succeeded",
+	}
+	if !schemaVerified {
+		ds.LastSyncStatus = "succeeded_unverified"
+	}
+	if mode == "incremental" && prev != nil {
+		ds.RowCount = prev.RowCount + int64(len(result.Rows))
+		ds.BytesRaw = prev.BytesRaw + rawBytes
+		ds.BytesParquet = prev.BytesParquet + parquetInfo.Size()
+		ds.ParquetPaths = append(append([]string(nil), prev.ParquetPaths...), path)
+		if verifyErr != nil {
+			ds.Columns = prev.Columns
+			ds.SchemaVerified = prev.SchemaVerified
+		}
+	}
+	return s.upsertWarehouseEvidence(ctx, ds)
+}
+
+// getWarehouseEvidence reads one stored dataset record; a missing store or a
+// read failure means "no previous evidence" and the sync proceeds as a full
+// refresh rather than guessing incremental state.
+func (s *Service) getWarehouseEvidence(ctx context.Context, databaseID, tableName string) (*domain.WarehouseDataset, bool, error) {
+	if s.warehouseEvidence == nil {
+		return nil, false, nil
+	}
+	ds, ok, err := s.warehouseEvidence.GetWarehouseDataset(ctx, databaseID, tableName)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	stored := ds
+	return &stored, true, nil
+}
+
+func (s *Service) upsertWarehouseEvidence(ctx context.Context, ds domain.WarehouseDataset) error {
+	if s.warehouseEvidence == nil {
+		return nil
+	}
+	return s.warehouseEvidence.UpsertWarehouseDataset(ctx, ds)
+}
+
+// resolveWarehouseSyncMode decides full vs incremental for one dataset.
+// Incremental runs only when the caller requested it AND the catalogue holds a
+// previously recorded sync with a watermark value: a dataset's first sync is
+// therefore always a full refresh, which is the boundary the incremental
+// WHERE-clause builder relies on.
+func resolveWarehouseSyncMode(opts WarehouseSyncOptions, prev *domain.WarehouseDataset) (mode, watermarkColumn, lastWatermark string, err error) {
+	mode = "full"
+	watermarkColumn = strings.TrimSpace(opts.WatermarkColumn)
+	if watermarkColumn == "" && prev != nil {
+		watermarkColumn = prev.WatermarkColumn
+	}
+	if opts.Incremental && prev != nil && prev.LastSyncStatus != "" && watermarkColumn != "" && prev.LastWatermarkValue != "" {
+		if !biIdentifier.MatchString(watermarkColumn) {
+			return "", "", "", fmt.Errorf("watermark column %q is not a safe identifier", watermarkColumn)
+		}
+		mode = "incremental"
+		lastWatermark = prev.LastWatermarkValue
+	}
+	return mode, watermarkColumn, lastWatermark, nil
+}
+
+// buildWarehouseExtractQuery composes the extraction SQL for one dataset.
+// Without a watermark cursor it is a full-table read; with one it narrows to
+// rows strictly past the last recorded value so an incremental sync extracts
+// exactly the tail. The value is quote-escaped, never parameterized, because
+// the extraction runs through the psql/mysql CLI invocation path.
+func buildWarehouseExtractQuery(table, mode, watermarkColumn, lastWatermark string) string {
+	if mode != "incremental" || watermarkColumn == "" {
+		return "SELECT * FROM " + table
+	}
+	value := strings.ReplaceAll(lastWatermark, "'", "''")
+	return fmt.Sprintf("SELECT * FROM %s WHERE %s > '%s' ORDER BY %s", table, watermarkColumn, value, watermarkColumn)
+}
+
+// inspectParquet verifies a written Parquet artifact with the real analytical
+// runtime: DESCRIBE yields the on-disk schema and COUNT(*) the on-disk row
+// count. When DuckDB cannot verify the file the caller records the sync as
+// succeeded_unverified instead of inventing facts. It is a variable so tests
+// can stub the schema reader without requiring the duckdb CLI.
+var inspectParquet = func(duckdbPath, path string) ([]domain.WarehouseColumn, int64, error) {
+	if duckdbPath == "" {
+		return nil, 0, fmt.Errorf("duckdb runtime unavailable")
+	}
+	quoted := strings.ReplaceAll(path, "'", "''")
+	desc := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("DESCRIBE SELECT * FROM read_parquet('%s')", quoted))
+	out, err := desc.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("describe parquet: %w", err)
+	}
+	cols, err := parseDescribeCSV(out)
+	if err != nil {
+		return nil, 0, err
+	}
+	cnt := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", quoted))
+	cout, err := cnt.Output()
+	if err != nil {
+		return nil, 0, fmt.Errorf("count parquet rows: %w", err)
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(cout)), 10, 64)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count parquet rows: %w", err)
+	}
+	return cols, n, nil
+}
+
+// parseDescribeCSV parses DuckDB's `DESCRIBE SELECT ...` CSV output
+// (column_name, column_type, null, key, default, extra) with the header
+// suppressed.
+func parseDescribeCSV(out []byte) ([]domain.WarehouseColumn, error) {
+	recs, err := csv.NewReader(bytes.NewReader(out)).ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("describe parquet: %w", err)
+	}
+	cols := make([]domain.WarehouseColumn, 0, len(recs))
+	for _, rec := range recs {
+		if len(rec) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(rec[0])
+		if name == "" || strings.EqualFold(name, "column_name") {
+			continue
+		}
+		cols = append(cols, domain.WarehouseColumn{Name: name, Type: strings.TrimSpace(rec[1])})
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("describe parquet returned no schema")
+	}
+	return cols, nil
+}
+
+func columnsFromResult(cols []warehouse.ColumnMeta) []domain.WarehouseColumn {
+	out := make([]domain.WarehouseColumn, 0, len(cols))
+	for _, c := range cols {
+		out = append(out, domain.WarehouseColumn{Name: c.Name, Type: c.Type})
+	}
+	return out
+}
+
+func parquetColumnsMatch(onDisk []domain.WarehouseColumn, extracted []warehouse.ColumnMeta) bool {
+	if len(onDisk) != len(extracted) {
+		return false
+	}
+	for i := range onDisk {
+		if !strings.EqualFold(onDisk[i].Name, extracted[i].Name) {
+			return false
+		}
+	}
+	return true
+}
+
+func columnIndex(cols []warehouse.ColumnMeta, name string) int {
+	for i, c := range cols {
+		if strings.EqualFold(c.Name, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// detectWatermarkColumn picks a natural incremental cursor from an extracted
+// schema: a mutation timestamp first, then a creation timestamp, then a
+// monotonically named id. An empty result means the table can only be synced
+// by full refresh.
+func detectWatermarkColumn(cols []warehouse.ColumnMeta) string {
+	if c := findColumn(cols, "updated_at"); c != "" {
+		return c
+	}
+	if c := findColumn(cols, "last_modified"); c != "" {
+		return c
+	}
+	if c := findColumn(cols, "created_at"); c != "" {
+		return c
+	}
+	if c := findColumn(cols, "id"); c != "" {
+		return c
+	}
+	return ""
+}
+
+func findColumn(cols []warehouse.ColumnMeta, name string) string {
+	for _, c := range cols {
+		if strings.EqualFold(c.Name, name) && biIdentifier.MatchString(c.Name) {
+			return c.Name
+		}
+	}
+	return ""
+}
+
+func classifyWatermarkType(cols []warehouse.ColumnMeta, name string) string {
+	idx := columnIndex(cols, name)
+	if idx < 0 {
+		return ""
+	}
+	t := strings.ToLower(cols[idx].Type)
+	switch {
+	case strings.Contains(t, "timestamp"), strings.Contains(t, "datetime"):
+		return "datetime"
+	case strings.Contains(t, "date"):
+		return "date"
+	case strings.Contains(t, "int"), strings.Contains(t, "serial"), strings.Contains(t, "bigserial"):
+		return "integer"
+	default:
+		return "text"
+	}
+}
+
+func normalizeWatermarkValue(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case time.Time:
+		return t.UTC().Format(time.RFC3339Nano)
+	default:
+		return fmt.Sprint(t)
+	}
+}
+
+// watermarkGreater compares two watermark values of the same declared type.
+// Integer cursors compare numerically; everything else compares lexically,
+// which is correct for ISO dates/timestamps.
+func watermarkGreater(a, b, typ string) bool {
+	if typ == "integer" {
+		ai, aerr := strconv.ParseInt(a, 10, 64)
+		bi, berr := strconv.ParseInt(b, 10, 64)
+		if aerr == nil && berr == nil {
+			return ai > bi
+		}
+	}
+	return a > b
+}
+
+func (s *Service) writeWarehouseParquet(ctx context.Context, duckdbPath, path string, result *warehouse.QueryResult) (int64, error) {
+	tmp, err := os.CreateTemp(filepath.Join(s.root, "lakehouse"), "extract-*.csv")
+	if err != nil {
+		return 0, err
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
@@ -274,7 +682,7 @@ func (s *Service) writeWarehouseParquet(ctx context.Context, duckdbPath, path st
 	}
 	if err := writer.Write(header); err != nil {
 		_ = tmp.Close()
-		return err
+		return 0, err
 	}
 	for _, row := range result.Rows {
 		values := make([]string, len(header))
@@ -285,27 +693,92 @@ func (s *Service) writeWarehouseParquet(ctx context.Context, duckdbPath, path st
 		}
 		if err := writer.Write(values); err != nil {
 			_ = tmp.Close()
-			return err
+			return 0, err
 		}
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
 		_ = tmp.Close()
-		return err
+		return 0, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return 0, err
+	}
+	var rawBytes int64
+	if info, err := os.Stat(tmpPath); err == nil {
+		rawBytes = info.Size()
 	}
 	copySQL := fmt.Sprintf("COPY (SELECT * FROM read_csv_auto('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD)", strings.ReplaceAll(tmpPath, "'", "''"), strings.ReplaceAll(path, "'", "''"))
 	cmd := exec.CommandContext(ctx, duckdbPath, "-c", copySQL)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("duckdb: %w (%s)", err, strings.TrimSpace(string(out)))
+		return rawBytes, fmt.Errorf("duckdb: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	info, err := os.Stat(path)
 	if err != nil || info.Size() == 0 {
-		return fmt.Errorf("parquet artifact verification failed")
+		return rawBytes, fmt.Errorf("parquet artifact verification failed")
 	}
-	return nil
+	return rawBytes, nil
+}
+
+// warehouseEvidenceIndex loads the catalogue-backed evidence and indexes it by
+// database and by (database, dataset). An absent store or a read error yields
+// empty indexes; the catalog then falls back to filesystem-derived facts.
+func (s *Service) warehouseEvidenceIndex(ctx context.Context) (map[string][]domain.WarehouseDataset, map[string]domain.WarehouseDataset) {
+	byDB := map[string][]domain.WarehouseDataset{}
+	byKey := map[string]domain.WarehouseDataset{}
+	if s.warehouseEvidence == nil {
+		return byDB, byKey
+	}
+	datasets, err := s.warehouseEvidence.ListWarehouseDatasets(ctx, "")
+	if err != nil {
+		return byDB, byKey
+	}
+	for _, ds := range datasets {
+		byDB[ds.DatabaseID] = append(byDB[ds.DatabaseID], ds)
+		byKey[ds.DatabaseID+"\x00"+ds.DatasetName] = ds
+	}
+	return byDB, byKey
+}
+
+// evidenceTableDataset overlays stored sync evidence onto a catalog row. The
+// evidence wins because it was measured by the sync pipeline; fields the
+// evidence cannot speak to keep their inventory-derived values.
+func evidenceTableDataset(base warehouse.TableDataset, ev domain.WarehouseDataset) warehouse.TableDataset {
+	base.RowCount = ev.RowCount
+	base.UncompressedBytes = ev.BytesRaw
+	base.ParquetSizeBytes = ev.BytesParquet
+	if len(ev.ParquetPaths) > 0 {
+		base.ParquetLocation = ev.ParquetPaths[0]
+		base.PartitionCount = len(ev.ParquetPaths)
+	}
+	if ev.BytesRaw > 0 && ev.BytesParquet > 0 {
+		base.CompressionRatio = float64(ev.BytesRaw) / float64(ev.BytesParquet)
+	}
+	if !ev.LastSyncAt.IsZero() {
+		base.LastSyncedAt = ev.LastSyncAt
+		base.SyncStatus = "synced"
+	}
+	if len(ev.Columns) > 0 {
+		cols := make([]warehouse.ColumnMeta, 0, len(ev.Columns))
+		for _, c := range ev.Columns {
+			cols = append(cols, warehouse.ColumnMeta{Name: c.Name, Type: c.Type})
+		}
+		base.Columns = cols
+	}
+	base.WatermarkColumn = ev.WatermarkColumn
+	base.LastWatermarkValue = ev.LastWatermarkValue
+	base.LastSyncMode = ev.LastSyncMode
+	base.SchemaVerified = ev.SchemaVerified
+	return base
+}
+
+func dbHasTable(tables []warehouse.TableDataset, name string) bool {
+	for _, t := range tables {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ExecuteWarehouseQuery runs an analytical SQL query against the lakehouse engine.
@@ -396,16 +869,23 @@ func (s *Service) ValidateWarehouseSync(ctx context.Context, databaseID string) 
 // the queue; when it is never called the sync API fails closed.
 func (s *Service) SetJobQueue(q ports.JobQueue) { s.jobQueue = q }
 
+// SetWarehouseEvidence wires the catalogue-backed evidence store that sync
+// runs record measured schema/counts/watermark state into. When it is never
+// called the catalog falls back to filesystem-derived facts.
+func (s *Service) SetWarehouseEvidence(store ports.WarehouseEvidenceStore) {
+	s.warehouseEvidence = store
+}
+
 // EnqueueWarehouseSync registers the job view (so /api/v1/jobs lists it
 // immediately) and pushes a durable warehouse_sync job onto the persistent
 // queue for a scheduler worker to execute. Demo mode keeps its simulated
 // flow. Fail-closed when the durable scheduler is not configured.
-func (s *Service) EnqueueWarehouseSync(ctx context.Context, databaseID string) (domain.JobView, error) {
+func (s *Service) EnqueueWarehouseSync(ctx context.Context, databaseID string, opts WarehouseSyncOptions) (domain.JobView, error) {
 	if s.demo {
 		return s.CreateJob("warehouse_sync", databaseID, databaseID), nil
 	}
 	view := s.newJobRecord("warehouse_sync", databaseID, databaseID)
-	if err := s.queueWarehouseSyncJob(view.ID, databaseID); err != nil {
+	if err := s.queueWarehouseSyncJob(view.ID, databaseID, opts); err != nil {
 		s.failJob(view.ID, "extract", fmt.Sprintf("Warehouse sync not queued: %v", err))
 		return view, err
 	}
@@ -415,12 +895,19 @@ func (s *Service) EnqueueWarehouseSync(ctx context.Context, databaseID string) (
 
 // queueWarehouseSyncJob pushes one durable warehouse_sync job. The px job
 // record ID rides in the payload so the worker updates exactly the record the
-// API returned.
-func (s *Service) queueWarehouseSyncJob(pxJobID, databaseID string) error {
+// API returned, and the sync options ride along so the worker honors the
+// caller's incremental intent.
+func (s *Service) queueWarehouseSyncJob(pxJobID, databaseID string, opts WarehouseSyncOptions) error {
 	if s.jobQueue == nil {
 		return fmt.Errorf("warehouse sync queue unavailable: durable scheduler not configured")
 	}
-	payload, err := json.Marshal(map[string]string{"source": databaseID, "operation": "warehouse_sync", "job_id": pxJobID})
+	payload, err := json.Marshal(map[string]any{
+		"source":           databaseID,
+		"operation":        "warehouse_sync",
+		"job_id":           pxJobID,
+		"incremental":      opts.Incremental,
+		"watermark_column": opts.WatermarkColumn,
+	})
 	if err != nil {
 		return err
 	}
@@ -440,10 +927,12 @@ func (s *Service) queueWarehouseSyncJob(pxJobID, databaseID string) error {
 // result JSON persisted with the durable job.
 func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) ([]byte, error) {
 	var payload struct {
-		Source    string `json:"source"`
-		Operation string `json:"operation"`
-		Schedule  string `json:"schedule"`
-		JobID     string `json:"job_id"`
+		Source          string `json:"source"`
+		Operation       string `json:"operation"`
+		Schedule        string `json:"schedule"`
+		JobID           string `json:"job_id"`
+		Incremental     bool   `json:"incremental"`
+		WatermarkColumn string `json:"watermark_column"`
 	}
 	if len(job.PayloadJSON) > 0 {
 		_ = json.Unmarshal(job.PayloadJSON, &payload)
@@ -452,6 +941,7 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 	if databaseID == "" {
 		databaseID = job.ResourceID
 	}
+	opts := WarehouseSyncOptions{Incremental: payload.Incremental, WatermarkColumn: payload.WatermarkColumn}
 	jobID := payload.JobID
 	s.mu.Lock()
 	_, recordAlive := s.jobs[jobID]
@@ -464,29 +954,33 @@ func (s *Service) ExecuteWarehouseSyncJob(ctx context.Context, job domain.Job) (
 	}
 
 	s.updateJobStage(jobID, "extract", 15, fmt.Sprintf("Extracting source tables for %s", databaseID))
-	if err := s.runWarehouseSyncPipeline(ctx, databaseID); err != nil {
+	if err := s.runWarehouseSyncPipeline(ctx, databaseID, opts); err != nil {
 		s.failJob(jobID, "transform_parquet", fmt.Sprintf("Warehouse sync failed: %v", err))
 		return nil, err
 	}
+	mode := "full refresh"
+	if opts.Incremental {
+		mode = "watermark-incremental where a previous sync existed"
+	}
 	s.updateJobStage(jobID, "transform_parquet", 60, "Parquet artifacts written and verified")
-	s.updateJobStage(jobID, "partition", 75, "Partition metadata committed")
+	s.updateJobStage(jobID, "partition", 75, "Sync evidence committed to the catalogue")
 	s.updateJobStage(jobID, "load_warehouse", 88, "Analytical tables materialized")
 	s.updateJobStage(jobID, "validate_indexes", 95, "Validated warehouse artifacts")
-	s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("Data Warehouse synchronized successfully for %s", databaseID))
-	s.appendLog(jobID, "info", "complete", fmt.Sprintf("Warehouse sync finished for %s. Verified Parquet datasets are ready.", databaseID))
-	return json.Marshal(map[string]any{"job_id": jobID, "database": databaseID, "schedule": payload.Schedule, "status": "complete"})
+	s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("Data Warehouse synchronized successfully for %s (%s)", databaseID, mode))
+	s.appendLog(jobID, "info", "complete", fmt.Sprintf("Warehouse sync finished for %s. Verified Parquet datasets and catalogue evidence are ready.", databaseID))
+	return json.Marshal(map[string]any{"job_id": jobID, "database": databaseID, "schedule": payload.Schedule, "status": "complete", "mode": opts.Incremental})
 }
 
 // runWarehouseSyncPipeline executes the real extraction pipeline. Tests inject
 // warehouseSyncRunner to exercise the job lifecycle without live sources.
-func (s *Service) runWarehouseSyncPipeline(ctx context.Context, databaseID string) error {
+func (s *Service) runWarehouseSyncPipeline(ctx context.Context, databaseID string, opts WarehouseSyncOptions) error {
 	if s.warehouseSyncRunner != nil {
-		return s.warehouseSyncRunner(ctx, databaseID)
+		return s.warehouseSyncRunner(ctx, databaseID, opts)
 	}
 	if err := s.ValidateWarehouseSync(ctx, databaseID); err != nil {
 		return err
 	}
-	return s.SyncWarehouse(ctx, databaseID)
+	return s.SyncWarehouse(ctx, databaseID, opts)
 }
 
 // validateWarehouseQuery keeps the warehouse interface deliberately narrow:

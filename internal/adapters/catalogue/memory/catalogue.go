@@ -3,20 +3,23 @@ package memory
 import (
 	"context"
 	"fmt"
-	"github.com/dbvault/dbvault/internal/domain"
+	"sort"
 	"sync"
+
+	"github.com/dbvault/dbvault/internal/domain"
 )
 
 type Catalogue struct {
-	mu         sync.Mutex
-	runs       map[domain.BackupRunID]domain.BackupRun
-	snaps      map[domain.SnapshotID]domain.Snapshot
-	snapChunks map[domain.SnapshotID][]domain.SnapshotChunk
-	chunks     map[domain.ChunkID]domain.Chunk
+	mu                sync.Mutex
+	runs              map[domain.BackupRunID]domain.BackupRun
+	snaps             map[domain.SnapshotID]domain.Snapshot
+	snapChunks        map[domain.SnapshotID][]domain.SnapshotChunk
+	chunks            map[domain.ChunkID]domain.Chunk
+	warehouseDatasets map[string]domain.WarehouseDataset
 }
 
 func New() *Catalogue {
-	return &Catalogue{runs: map[domain.BackupRunID]domain.BackupRun{}, snaps: map[domain.SnapshotID]domain.Snapshot{}, snapChunks: map[domain.SnapshotID][]domain.SnapshotChunk{}, chunks: map[domain.ChunkID]domain.Chunk{}}
+	return &Catalogue{runs: map[domain.BackupRunID]domain.BackupRun{}, snaps: map[domain.SnapshotID]domain.Snapshot{}, snapChunks: map[domain.SnapshotID][]domain.SnapshotChunk{}, chunks: map[domain.ChunkID]domain.Chunk{}, warehouseDatasets: map[string]domain.WarehouseDataset{}}
 }
 func (c *Catalogue) CreateBackupRun(ctx context.Context, run domain.BackupRun) error {
 	c.mu.Lock()
@@ -69,4 +72,31 @@ func (c *Catalogue) FindSnapshotByRoot(ctx context.Context, sourceID domain.Sour
 		}
 	}
 	return domain.Snapshot{}, false, nil
+}
+
+func (c *Catalogue) UpsertWarehouseDataset(ctx context.Context, ds domain.WarehouseDataset) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warehouseDatasets[domain.WarehouseDatasetKey(ds.DatabaseID, ds.DatasetName)] = ds
+	return nil
+}
+
+func (c *Catalogue) GetWarehouseDataset(ctx context.Context, databaseID, datasetName string) (domain.WarehouseDataset, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ds, ok := c.warehouseDatasets[domain.WarehouseDatasetKey(databaseID, datasetName)]
+	return ds, ok, nil
+}
+
+func (c *Catalogue) ListWarehouseDatasets(ctx context.Context, databaseID string) ([]domain.WarehouseDataset, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []domain.WarehouseDataset{}
+	for _, ds := range c.warehouseDatasets {
+		if databaseID == "" || ds.DatabaseID == databaseID {
+			out = append(out, ds)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].LastSyncAt.After(out[j].LastSyncAt) })
+	return out, nil
 }
