@@ -22,6 +22,7 @@ import (
 	"github.com/dbvault/dbvault/internal/adapters/warehouse"
 	"github.com/dbvault/dbvault/internal/config"
 	"github.com/dbvault/dbvault/internal/domain"
+	"github.com/dbvault/dbvault/internal/ports"
 )
 
 type Service struct {
@@ -48,6 +49,8 @@ type Service struct {
 	customDestinationConfigs map[string]StorageDestinationInput
 	biConnections            map[string]BIConnection
 	activeLiveJobs           map[string]bool
+	jobQueue                 ports.JobQueue
+	warehouseSyncRunner      func(ctx context.Context, databaseID string) error
 	warehouseEngine          *warehouse.DuckDBEngine
 	auditEvents              []domain.AuditEvent
 	demo                     bool

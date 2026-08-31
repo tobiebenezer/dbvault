@@ -38,11 +38,11 @@ func SpecsFromConfig(cfg config.Config) []Spec {
 		if id == "" {
 			id = sc.Source + "-" + sc.Operation
 		}
-		spec := Spec{ID: id, SourceID: sc.Source, Operation: sc.Operation, Cron: sc.Cron, Timezone: sc.Timezone}
+		spec := Spec{ID: id, SourceID: sc.Source, Operation: sc.Operation, Cron: sc.Cron, Timezone: sc.Timezone, EverySeconds: sc.EverySeconds}
 		if spec.Operation == "" {
 			spec.Operation = "logical_backup"
 		}
-		if id == legacyScheduleID && spec.Cron == "" {
+		if id == legacyScheduleID && spec.Cron == "" && spec.EverySeconds <= 0 {
 			spec.EverySeconds = cfg.Schedule.EverySeconds
 		}
 		if spec.Cron == "" && spec.EverySeconds <= 0 {
@@ -216,9 +216,13 @@ func (s *Scheduler) dueFire(spec Spec, now time.Time) (time.Time, bool) {
 // restart-safe dedupe works through the queue's idempotent Enqueue.
 func JobForFire(spec Spec, fire time.Time) domain.Job {
 	payload, _ := json.Marshal(map[string]string{"source": spec.SourceID, "operation": spec.Operation, "schedule": spec.ID})
+	jobType := domain.JobBackup
+	if spec.Operation == "warehouse_sync" {
+		jobType = domain.JobWarehouseSync
+	}
 	return domain.Job{
 		ID:          domain.JobID(fmt.Sprintf("sched-%s-%d", spec.ID, fire.Unix())),
-		Type:        domain.JobBackup,
+		Type:        jobType,
 		Status:      domain.JobPending,
 		ResourceID:  spec.SourceID,
 		PayloadJSON: payload,

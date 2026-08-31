@@ -303,12 +303,13 @@ type MySQLBinlogConfig struct {
 }
 
 type ScheduleConfig struct {
-	ID        string `json:"id" yaml:"id"`
-	Source    string `json:"source" yaml:"source"`
-	Operation string `json:"operation" yaml:"operation"`
-	Cron      string `json:"cron" yaml:"cron"`
-	Timezone  string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
-	Enabled   *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	ID           string `json:"id" yaml:"id"`
+	Source       string `json:"source" yaml:"source"`
+	Operation    string `json:"operation" yaml:"operation"`
+	Cron         string `json:"cron" yaml:"cron"`
+	Timezone     string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	Enabled      *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	EverySeconds int    `json:"every_seconds,omitempty" yaml:"every_seconds,omitempty"`
 }
 type VerificationConfig struct {
 	MetadataInterval string             `json:"metadata_interval,omitempty" yaml:"metadata_interval,omitempty"`
@@ -682,8 +683,13 @@ func Validate(c Config) error {
 		if _, ok := sourceIDs[s.Source]; !ok {
 			errs = append(errs, fmt.Errorf("schedule %s references unknown source %q", s.ID, s.Source))
 		}
-		if s.Cron == "" {
-			errs = append(errs, fmt.Errorf("schedule %s cron is required", s.ID))
+		switch s.Operation {
+		case "", "logical_backup", "warehouse_sync":
+		default:
+			errs = append(errs, fmt.Errorf("schedule %s has unsupported operation %q (supported: logical_backup, warehouse_sync)", s.ID, s.Operation))
+		}
+		if s.Cron == "" && s.EverySeconds <= 0 {
+			errs = append(errs, fmt.Errorf("schedule %s requires cron or every_seconds", s.ID))
 		}
 	}
 	if strings.EqualFold(c.ControlPlane.Mode, "production") {

@@ -231,6 +231,10 @@ func (a *Appliance) IsReady() bool {
 	return a.ready
 }
 
+// ProductService exposes the product-experience service so cmd/dbvault can
+// hand the durable job queue to it at runtime (warehouse sync execution).
+func (a *Appliance) ProductService() *productexperience.Service { return a.px }
+
 func (a *Appliance) EnsureSetupToken() (string, error) {
 	return a.setup.Ensure()
 }
@@ -1809,7 +1813,12 @@ func (a *Appliance) warehouseSync(w http.ResponseWriter, r *http.Request) {
 	if dbID == "" {
 		dbID = "all-databases"
 	}
-	job := a.px.CreateJob("warehouse_sync", dbID, dbID)
+	job, err := a.px.EnqueueWarehouseSync(r.Context(), dbID)
+	if err != nil {
+		// Fail closed: no durable scheduler means no honest way to run the sync.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, job)
 }
 

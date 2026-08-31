@@ -121,6 +121,41 @@ func (s *Service) JobEventsSince(last string, limit int) []domain.JobEvent {
 }
 
 func (s *Service) CreateJob(jobType, resourceID, resourceName string) domain.JobView {
+	view := s.newJobRecord(jobType, resourceID, resourceName)
+
+	if !s.demo {
+		s.mu.Lock()
+		if s.activeLiveJobs == nil {
+			s.activeLiveJobs = map[string]bool{}
+		}
+		s.activeLiveJobs[view.ID] = true
+		s.mu.Unlock()
+		if jobType == "backup" {
+			go s.executeLiveBackupAsync(view.ID, resourceID, resourceName)
+		} else if jobType == "restore" {
+			go s.executeLiveRestoreAsync(view.ID, resourceID, resourceName)
+		} else if jobType == "sandbox" {
+			go s.executeLiveSandboxAsync(view.ID, resourceID, resourceName)
+		} else if jobType == "restore_drill" {
+			go s.executeLiveRestoreDrillAsync(view.ID, resourceID, resourceName)
+		} else if jobType == "warehouse_sync" {
+			// Durable path: the sync executes on a scheduler worker after the
+			// job is leased from the persistent queue, never a local goroutine.
+			if err := s.queueWarehouseSyncJob(view.ID, resourceID); err != nil {
+				s.failJob(view.ID, "extract", fmt.Sprintf("Warehouse sync not queued: %v", err))
+			} else {
+				s.appendLog(view.ID, "info", view.Stage, "Queued on the durable scheduler.")
+			}
+		}
+	}
+
+	return view
+}
+
+// newJobRecord registers the lightweight in-memory job view and its initial
+// log line so /api/v1/jobs lists the job immediately, before any worker picks
+// it up.
+func (s *Service) newJobRecord(jobType, resourceID, resourceName string) domain.JobView {
 	if strings.TrimSpace(jobType) == "" {
 		jobType = "backup"
 	}
@@ -138,57 +173,7 @@ func (s *Service) CreateJob(jobType, resourceID, resourceName string) domain.Job
 	s.jobLogs[job.ID] = []domain.JobLogLine{{ID: job.ID + "-log-1", JobID: job.ID, Level: "info", Stage: job.Stage, Message: job.Message, CreatedAt: now}}
 	s.appendJobEventLocked("job.created", job, job.Message)
 	s.mu.Unlock()
-
-	if !s.demo {
-		s.mu.Lock()
-		if s.activeLiveJobs == nil {
-			s.activeLiveJobs = map[string]bool{}
-		}
-		s.activeLiveJobs[job.ID] = true
-		s.mu.Unlock()
-		if jobType == "backup" {
-			go s.executeLiveBackupAsync(job.ID, resourceID, resourceName)
-		} else if jobType == "restore" {
-			go s.executeLiveRestoreAsync(job.ID, resourceID, resourceName)
-		} else if jobType == "sandbox" {
-			go s.executeLiveSandboxAsync(job.ID, resourceID, resourceName)
-		} else if jobType == "restore_drill" {
-			go s.executeLiveRestoreDrillAsync(job.ID, resourceID, resourceName)
-		} else if jobType == "warehouse_sync" {
-			go s.executeLiveWarehouseSyncAsync(job.ID, resourceID, resourceName)
-		}
-	}
-
 	return job
-}
-
-func (s *Service) executeLiveWarehouseSyncAsync(jobID, resourceID, resourceName string) {
-	defer func() {
-		s.mu.Lock()
-		delete(s.activeLiveJobs, jobID)
-		s.mu.Unlock()
-	}()
-
-	if s.demo {
-		s.seedDefaultWarehouseTables()
-		s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("Demo warehouse datasets loaded for %s", resourceName))
-		return
-	}
-	if err := s.ValidateWarehouseSync(context.Background(), resourceID); err != nil {
-		s.failJob(jobID, "extract", fmt.Sprintf("Warehouse sync not started: %v", err))
-		return
-	}
-	s.updateJobStage(jobID, "extract", 15, fmt.Sprintf("Extracting source tables for %s", resourceName))
-	if err := s.SyncWarehouse(context.Background(), resourceID); err != nil {
-		s.failJob(jobID, "transform_parquet", fmt.Sprintf("Warehouse sync failed: %v", err))
-		return
-	}
-	s.updateJobStage(jobID, "transform_parquet", 60, "Parquet artifacts written and verified")
-	s.updateJobStage(jobID, "partition", 75, "Partition metadata committed")
-	s.updateJobStage(jobID, "load_warehouse", 88, "Analytical tables materialized")
-	s.updateJobStage(jobID, "validate_indexes", 95, "Validated warehouse artifacts")
-	s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("Data Warehouse synchronized successfully for %s", resourceName))
-	s.appendLog(jobID, "info", "complete", fmt.Sprintf("Warehouse sync finished for %s. Verified Parquet datasets are ready.", resourceName))
 }
 
 func (s *Service) executeLiveBackupAsync(jobID, resourceID, resourceName string) {

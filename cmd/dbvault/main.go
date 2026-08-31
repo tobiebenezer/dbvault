@@ -891,7 +891,7 @@ func serverCmd(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo, metrics)
+	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo, metrics, appliance.ProductService())
 	defer stopJobs()
 
 	if appDbURL != "" {
@@ -916,7 +916,7 @@ func serverCmd(args []string) {
 // their simulated data flow untouched. When metrics is non-nil the runtime
 // records job outcomes, durations, bytes backed up, queue depth and
 // lease-expiry events into it.
-func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, enabled bool, metrics *prometheus.Metrics) (stop func()) {
+func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, enabled bool, metrics *prometheus.Metrics, px *productexperience.Service) (stop func()) {
 	noop := func() {}
 	if !enabled {
 		return noop
@@ -948,6 +948,9 @@ func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, ena
 			}
 			return json.Marshal(map[string]any{"plan_id": plan.ID, "reclaimable_bytes": plan.ReclaimableBytes, "deleted": len(plan.DeleteKeys)})
 		}
+		if job.Type == domain.JobWarehouseSync {
+			return px.ExecuteWarehouseSyncJob(ctx, job)
+		}
 		src, err := scheduledSource(app, job.ResourceID)
 		if err != nil {
 			return nil, err
@@ -978,12 +981,15 @@ func startJobRuntime(ctx context.Context, cfg config.Config, dataDir string, ena
 				metrics.AddCounter("dbvault_lease_expired_events_total", nil, float64(count))
 			}
 		}})
+	// Hand the durable queue to the product-experience service so the
+	// warehouse sync API enqueues real jobs instead of spawning goroutines.
+	px.SetJobQueue(q)
 	workers := cfg.Schedule.Workers
 	if workers <= 0 {
 		workers = 1
 	}
 	pool := scheduler.NewWorkerPool(scheduler.WorkerOptions{Queue: q, Executor: executor, Workers: workers, Logger: logger,
-		Types: []domain.JobType{domain.JobBackup, domain.JobGarbageCollection},
+		Types: []domain.JobType{domain.JobBackup, domain.JobGarbageCollection, domain.JobWarehouseSync},
 		OnSettled: func(job domain.Job, execErr error, result []byte) {
 			sched.Settle(job)
 			recordJobMetrics(metrics, job, execErr, result)

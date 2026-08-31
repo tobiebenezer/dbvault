@@ -16,6 +16,7 @@ const (
 	JobGarbageCollection JobType = "garbage_collection"
 	JobRepositoryScan    JobType = "repository_scan"
 	JobRepositoryRepair  JobType = "repository_repair"
+	JobWarehouseSync     JobType = "warehouse_sync"
 )
 
 type JobStatus string
