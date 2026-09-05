@@ -363,16 +363,36 @@ function AddStorageModal({ initialDestination, onClose, onAdded }) {
     setTestResult(null);
   };
 
+  const sanitizeEndpointUrl = (urlStr, bucketStr) => {
+    let ep = (urlStr || '').trim();
+    if (!ep) return '';
+    if (!ep.startsWith('http://') && !ep.startsWith('https://')) {
+      ep = 'https://' + ep;
+    }
+    try {
+      const u = new URL(ep);
+      const cleanPath = u.pathname.replace(/^\/+|\/+$/g, '');
+      const cleanBucket = (bucketStr || '').trim();
+      if (cleanPath === cleanBucket || cleanPath.endsWith('/' + cleanBucket) || u.hostname.endsWith('.r2.cloudflarestorage.com')) {
+        u.pathname = '';
+      }
+      return u.origin;
+    } catch {
+      return ep.replace(/\/+$/, '');
+    }
+  };
+
   const handleTest = async () => {
     try {
       setTesting(true);
       setTestResult(null);
+      const cleanEp = sanitizeEndpointUrl(endpoint, bucket);
       const res = await API.testDestination({
         name,
         provider: selectedPreset.provider,
         role,
-        endpoint,
-        bucket,
+        endpoint: cleanEp,
+        bucket: bucket.trim(),
         region,
         access_key: accessKey,
         secret_key: secretKey
@@ -398,12 +418,13 @@ function AddStorageModal({ initialDestination, onClose, onAdded }) {
     }
     try {
       setSaving(true);
+      const cleanEp = sanitizeEndpointUrl(endpoint, bucket);
       await API.createDestination({
         id: initialDestination?.id || undefined,
         name: name.trim(),
         provider: selectedPreset.provider,
         role,
-        endpoint: endpoint.trim(),
+        endpoint: cleanEp,
         bucket: bucket.trim(),
         region: region.trim(),
         access_key: accessKey.trim(),
@@ -469,6 +490,9 @@ function AddStorageModal({ initialDestination, onClose, onAdded }) {
             <div className="form-field" style={{ gridColumn: 'span 2' }}>
               <label>Endpoint URL</label>
               <input className="form-input cell-mono" value={endpoint} onInput={(e) => setEndpoint(e.currentTarget.value)} required />
+              <span className="field-hint" style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', display: 'block' }}>
+                For Cloudflare R2, use your base account URL (e.g. <code>https://&lt;account-id&gt;.r2.cloudflarestorage.com</code>). Do not include bucket name.
+              </span>
             </div>
             <div className="form-field">
               <label>Bucket / Container Name</label>

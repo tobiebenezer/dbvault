@@ -7,17 +7,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"github.com/dbvault/dbvault/internal/domain"
-	"github.com/dbvault/dbvault/internal/ports"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/dbvault/dbvault/internal/domain"
+	"github.com/dbvault/dbvault/internal/ports"
 )
 
-type Driver struct{ SQLite3Path string }
+type Driver struct {
+	SQLite3Path string
+}
 
 func New(sqlite3Path string) *Driver {
 	if sqlite3Path == "" {
@@ -25,6 +29,7 @@ func New(sqlite3Path string) *Driver {
 	}
 	return &Driver{SQLite3Path: sqlite3Path}
 }
+
 func (d *Driver) Name() string { return "sqlite" }
 
 func (d *Driver) Validate(ctx context.Context, source domain.Source) error {
@@ -34,6 +39,18 @@ func (d *Driver) Validate(ctx context.Context, source domain.Source) error {
 	}
 	if st.IsDir() {
 		return domain.NewError(domain.ErrSourceNotSQLite, "source is a directory", nil)
+	}
+	f, err := os.Open(source.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	header := make([]byte, 16)
+	if _, err := f.Read(header); err != nil {
+		return err
+	}
+	if string(header) != "SQLite format 3\x00" {
+		return domain.NewError(domain.ErrSourceNotSQLite, "file does not have SQLite header", nil)
 	}
 	return nil
 }
@@ -48,7 +65,14 @@ func (d *Driver) Inspect(ctx context.Context, source domain.Source) (domain.Sour
 	journal := d.queryString(ctx, source.Path, "PRAGMA journal_mode;", "unknown")
 	version := d.queryString(ctx, source.Path, "select sqlite_version();", "unknown")
 	digest := d.schemaDigest(ctx, source.Path)
-	return domain.SourceInspection{EngineVersion: version, FileSize: st.Size(), PageSize: pageSize, PageCount: pageCount, JournalMode: journal, SchemaDigest: digest}, nil
+	return domain.SourceInspection{
+		EngineVersion: version,
+		FileSize:      st.Size(),
+		PageSize:      pageSize,
+		PageCount:     pageCount,
+		JournalMode:   journal,
+		SchemaDigest:  digest,
+	}, nil
 }
 
 func (d *Driver) CreateSnapshot(ctx context.Context, req ports.SnapshotRequest) (ports.SnapshotArtifact, error) {
@@ -72,7 +96,12 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req ports.SnapshotRequest) 
 	}
 	pageSize := d.queryInt(ctx, out, "PRAGMA page_size;", 4096)
 	pageCount := d.queryInt64(ctx, out, "PRAGMA page_count;", st.Size()/int64(pageSize))
-	meta := ports.SnapshotMetadata{EngineVersion: d.queryString(ctx, out, "select sqlite_version();", "unknown"), PageSize: pageSize, PageCount: pageCount, SchemaDigest: d.schemaDigest(ctx, out)}
+	meta := ports.SnapshotMetadata{
+		EngineVersion: d.queryString(ctx, out, "select sqlite_version();", "unknown"),
+		PageSize:      pageSize,
+		PageCount:     pageCount,
+		SchemaDigest:  d.schemaDigest(ctx, out),
+	}
 	return &Artifact{path: out, size: st.Size(), meta: meta, cleanup: true}, nil
 }
 
@@ -84,6 +113,7 @@ func (d *Driver) queryString(ctx context.Context, db, sql, fallback string) stri
 	}
 	return strings.TrimSpace(string(b))
 }
+
 func (d *Driver) queryInt(ctx context.Context, db, sql string, fallback int) int {
 	s := d.queryString(ctx, db, sql, "")
 	v, err := strconv.Atoi(strings.TrimSpace(s))
@@ -92,6 +122,7 @@ func (d *Driver) queryInt(ctx context.Context, db, sql string, fallback int) int
 	}
 	return v
 }
+
 func (d *Driver) queryInt64(ctx context.Context, db, sql string, fallback int64) int64 {
 	s := d.queryString(ctx, db, sql, "")
 	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
@@ -100,13 +131,26 @@ func (d *Driver) queryInt64(ctx context.Context, db, sql string, fallback int64)
 	}
 	return v
 }
+
 func (d *Driver) schemaDigest(ctx context.Context, db string) string {
-	q := "SELECT type||'|'||name||'|'||tbl_name||'|'||coalesce(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name,tbl_name;"
-	cmd := exec.CommandContext(ctx, d.SQLite3Path, "-readonly", db, q)
+	q := "SELECT type, name, tbl_name, coalesce(sql,'') as sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name, tbl_name;"
+	cmd := exec.CommandContext(ctx, d.SQLite3Path, "-readonly", "-json", db, q)
 	b, err := cmd.Output()
 	if err != nil {
 		return "unknown"
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	var rows []struct {
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		TblName string `json:"tbl_name"`
+		SQL     string `json:"sql"`
+	}
+	if err := json.Unmarshal(b, &rows); err != nil {
+		return "unknown"
+	}
+	h := sha256.New()
+	for _, r := range rows {
+		_, _ = h.Write([]byte(r.Type + "\x00" + r.Name + "\x00" + r.TblName + "\x00" + r.SQL + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

@@ -62,6 +62,15 @@ func cronToken(tok string, names map[string]int) (int, error) {
 	return v, nil
 }
 
+// ComputeNextFire parses a 5-field cron expression and calculates the next fire time strictly after 'after' in 'loc'.
+func ComputeNextFire(spec string, after time.Time, loc *time.Location) (time.Time, error) {
+	e, err := parseCron(spec)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return e.NextAfter(after, loc), nil
+}
+
 func parseCron(spec string) (*cronExpr, error) {
 	fields := strings.Fields(strings.TrimSpace(spec))
 	if len(fields) != 5 {

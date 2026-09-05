@@ -32,16 +32,16 @@ type Catalogue struct {
 }
 
 type state struct {
-	Version           int                                `json:"version"`
-	Runs              map[string]domain.BackupRun        `json:"runs"`
-	Snapshots         map[string]domain.Snapshot         `json:"snapshots"`
-	Links             map[string][]domain.SnapshotChunk  `json:"links"`
-	Chunks            map[string]domain.Chunk            `json:"chunks"`
-	Audit             []AuditEvent                       `json:"audit"`
-	Leases            map[string]LeaseRecord             `json:"leases"`
-	WarehouseDatasets map[string]domain.WarehouseDataset `json:"warehouse_datasets,omitempty"`
+	Version           int                                        `json:"version"`
+	Runs              map[string]domain.BackupRun                `json:"runs"`
+	Snapshots         map[string]domain.Snapshot                 `json:"snapshots"`
+	Links             map[string][]domain.SnapshotChunk          `json:"links"`
+	Chunks            map[string]domain.Chunk                    `json:"chunks"`
+	Audit             []AuditEvent                               `json:"audit"`
+	Leases            map[string]LeaseRecord                     `json:"leases"`
+	WarehouseDatasets map[string]domain.WarehouseDataset         `json:"warehouse_datasets,omitempty"`
 	Connectors        map[string]domain.WarehouseConnectorRecord `json:"warehouse_connectors,omitempty"`
-	UpdatedAt         time.Time                          `json:"updated_at"`
+	UpdatedAt         time.Time                                  `json:"updated_at"`
 }
 
 type AuditEvent struct {

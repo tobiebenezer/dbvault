@@ -69,37 +69,37 @@ type RecoveryTarget struct {
 type PITRPlanID string
 
 type PITRPlan struct {
-	ID                  PITRPlanID              `json:"id"`
-	SourceID            SourceID                `json:"source_id"`
-	Engine              DatabaseEngine          `json:"engine"`
-	BaseBackups         []PhysicalBackupID      `json:"base_backups"`
-	Logs                []TransactionLogID      `json:"logs"`
-	TimelineHistory     []string                `json:"timeline_history"`
-	Target              RecoveryTarget          `json:"target"`
-	RecoveryWindow      RecoveryWindow          `json:"recovery_window"`
-	EstimatedDownload   int64                   `json:"estimated_download"`
-	EstimatedScratch    int64                   `json:"estimated_scratch"`
-	TargetDirectory     string                  `json:"target_directory"`
-	TargetServerVersion string                  `json:"target_server_version"`
-	Warnings            []string                `json:"warnings"`
-	CreatedAt           time.Time               `json:"created_at"`
-	ExpiresAt           time.Time               `json:"expires_at"`
-	RepositoryDigest    string                  `json:"repository_digest"`
-	CatalogueVersion    int64                   `json:"catalogue_version"`
-	Metadata            map[string]string       `json:"metadata,omitempty"`
+	ID                  PITRPlanID         `json:"id"`
+	SourceID            SourceID           `json:"source_id"`
+	Engine              DatabaseEngine     `json:"engine"`
+	BaseBackups         []PhysicalBackupID `json:"base_backups"`
+	Logs                []TransactionLogID `json:"logs"`
+	TimelineHistory     []string           `json:"timeline_history"`
+	Target              RecoveryTarget     `json:"target"`
+	RecoveryWindow      RecoveryWindow     `json:"recovery_window"`
+	EstimatedDownload   int64              `json:"estimated_download"`
+	EstimatedScratch    int64              `json:"estimated_scratch"`
+	TargetDirectory     string             `json:"target_directory"`
+	TargetServerVersion string             `json:"target_server_version"`
+	Warnings            []string           `json:"warnings"`
+	CreatedAt           time.Time          `json:"created_at"`
+	ExpiresAt           time.Time          `json:"expires_at"`
+	RepositoryDigest    string             `json:"repository_digest"`
+	CatalogueVersion    int64              `json:"catalogue_version"`
+	Metadata            map[string]string  `json:"metadata,omitempty"`
 }
 
 type PITRResult struct {
-	PlanID           PITRPlanID     `json:"plan_id"`
-	SourceID         SourceID       `json:"source_id"`
-	Engine           DatabaseEngine `json:"engine"`
-	Succeeded        bool           `json:"succeeded"`
-	ReachedTarget    bool           `json:"reached_target"`
-	RecoveredTo      RecoveryTarget `json:"recovered_to"`
-	StartedAt        time.Time      `json:"started_at"`
-	CompletedAt      time.Time      `json:"completed_at"`
-	ErrorCode        ErrorCode      `json:"error_code,omitempty"`
-	ErrorMessage     string         `json:"error_message,omitempty"`
+	PlanID        PITRPlanID     `json:"plan_id"`
+	SourceID      SourceID       `json:"source_id"`
+	Engine        DatabaseEngine `json:"engine"`
+	Succeeded     bool           `json:"succeeded"`
+	ReachedTarget bool           `json:"reached_target"`
+	RecoveredTo   RecoveryTarget `json:"recovered_to"`
+	StartedAt     time.Time      `json:"started_at"`
+	CompletedAt   time.Time      `json:"completed_at"`
+	ErrorCode     ErrorCode      `json:"error_code,omitempty"`
+	ErrorMessage  string         `json:"error_message,omitempty"`
 }
 
 type ChainValidationResult struct {

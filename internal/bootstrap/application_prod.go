@@ -96,7 +96,7 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applic
 	chunkBytes, _ := config.ParseBytes(binding.Repository.Chunking.SQLite.TargetSize)
 	comp := zstdc.New(binding.Repository.Compression.Level, binding.Repository.Compression.MinimumSavingsPercent)
 	bsvc := &backup.Service{Catalogue: cat, Source: srcDriver, Store: store, Scratch: scratch.New(cfg.Server.ScratchDirectory), Compressor: comp, Encryptor: enc, Signer: signer, Clock: ports.SystemClock{}, IDs: id.Generator{}, DedupKey: material.Secret, Repository: repo, TargetChunkBytes: chunkBytes}
-	rsvc := &restore.Service{Catalogue: cat, Store: store, Compressor: comp, Encryptor: enc, Signer: signer}
+	rsvc := &restore.Service{Catalogue: cat, Store: store, Compressor: comp, Encryptor: enc, Signer: signer, DedupKey: material.Secret}
 	return &Application{Config: cfg, Binding: binding, Catalogue: cat, ObjectStore: store, Backup: bsvc, Restore: rsvc, Close: func(context.Context) error { return cat.Close() }}, nil
 }
 

@@ -195,8 +195,16 @@ type DatabaseResource struct {
 	Score          int              `json:"score"`
 	LastBackupAt   time.Time        `json:"last_backup_at"`
 	LastDrillAt    time.Time        `json:"last_drill_at"`
+	HasBackup      bool             `json:"has_backup"`
+	BackupCount    int              `json:"backup_count"`
 	DestinationIDs []string         `json:"destination_ids"`
 	RepositoryID   string           `json:"repository_id"`
+	Host           string           `json:"host,omitempty"`
+	Port           int              `json:"port,omitempty"`
+	Username       string           `json:"username,omitempty"`
+	Password       string           `json:"password,omitempty"`
+	Path           string           `json:"path,omitempty"`
+	ConnectionURI  string           `json:"connection_uri,omitempty"`
 }
 
 type RepositoryResource struct {

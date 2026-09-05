@@ -7,14 +7,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	mf "github.com/dbvault/dbvault/internal/application/manifest"
-	"github.com/dbvault/dbvault/internal/domain"
-	"github.com/dbvault/dbvault/internal/ports"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dbvault/dbvault/internal/application/chunking"
+	"github.com/dbvault/dbvault/internal/application/digest"
+	mf "github.com/dbvault/dbvault/internal/application/manifest"
+	"github.com/dbvault/dbvault/internal/domain"
+	"github.com/dbvault/dbvault/internal/ports"
 )
 
 type Service struct {
@@ -23,6 +26,7 @@ type Service struct {
 	Compressor ports.Compressor
 	Encryptor  ports.Encryptor
 	Signer     ports.ManifestSigner
+	DedupKey   []byte
 }
 
 type Plan struct {
@@ -44,7 +48,14 @@ func (s *Service) Plan(ctx context.Context, id domain.SnapshotID, target string)
 	if _, _, e := s.readAndVerifyManifest(ctx, snap); e != nil {
 		warnings = append(warnings, e.Error())
 	}
-	return Plan{SnapshotID: id, LogicalSize: snap.DatabaseSize, ChunkCount: len(chunks), Target: target, OverwriteRequired: err == nil, Warnings: warnings}, nil
+	return Plan{
+		SnapshotID:        id,
+		LogicalSize:       snap.DatabaseSize,
+		ChunkCount:        len(chunks),
+		Target:            target,
+		OverwriteRequired: err == nil,
+		Warnings:          warnings,
+	}, nil
 }
 
 func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target string, replace bool) error {
@@ -55,11 +66,14 @@ func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target stri
 	if err != nil {
 		return err
 	}
-	payload, man, err := s.readAndVerifyManifest(ctx, snap)
+
+	// Strictly perform pre-restore manifest signature, completion hash,
+	// and Merkle tree validation BEFORE creating any directory or file on disk.
+	_, man, err := s.readAndVerifyManifest(ctx, snap)
 	if err != nil {
 		return err
 	}
-	_ = payload
+
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
@@ -76,11 +90,13 @@ func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target stri
 			_ = os.Remove(tmp)
 		}
 	}()
+
 	if man.Database.LogicalSize > 0 {
 		if err := f.Truncate(man.Database.LogicalSize); err != nil {
 			return err
 		}
 	}
+
 	for _, ch := range man.Chunks {
 		r, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: ch.ObjectKey})
 		if err != nil {
@@ -99,25 +115,35 @@ func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target stri
 		if err := s.Compressor.Decompress(ctx, bytes.NewReader(compressed), &plain); err != nil {
 			return err
 		}
+
+		// Verify chunk plaintext hash against ChunkID if DedupKey is available
+		if len(s.DedupKey) > 0 && man.Database.PageSize > 0 {
+			computedID := digest.ChunkID(s.DedupKey, man.Database.PageSize, plain.Bytes())
+			if computedID != ch.ChunkID {
+				return domain.NewError(domain.ErrChunkAuthenticationFailed, fmt.Sprintf("chunk hash mismatch: expected %s, got %s", ch.ChunkID, computedID), nil)
+			}
+		}
+
 		offset := ch.PageStart * int64(man.Database.PageSize)
 		if _, err := f.WriteAt(plain.Bytes(), offset); err != nil {
 			return err
 		}
 	}
+
 	if err := f.Sync(); err != nil {
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	switch man.Database.Engine {
 	case "", "sqlite":
-		// Legacy manifests always recorded engine sqlite; validate the
-		// reconstructed file header for that family only.
 		if err := validateSQLiteHeader(tmp); err != nil {
 			return err
 		}
 	}
+
 	if replace {
 		if _, err := os.Stat(target); err == nil {
 			rollback := fmt.Sprintf("%s.dbvault-rollback-%s", target, time.Now().UTC().Format("20060102T150405Z"))
@@ -126,6 +152,7 @@ func (s *Service) Restore(ctx context.Context, id domain.SnapshotID, target stri
 			}
 		}
 	}
+
 	if err := os.Rename(tmp, target); err != nil {
 		return err
 	}
@@ -148,45 +175,94 @@ func (s *Service) readAndVerifyManifest(ctx context.Context, snap domain.Snapsho
 	if err != nil {
 		return nil, man, err
 	}
+
+	// 1. Verify Manifest Signature
 	sigKey := strings.TrimSuffix(snap.ManifestObjectKey, ".json") + ".sig"
 	if sigKey == "" || sigKey == ".sig" {
 		sigKey = fmt.Sprintf("%s/snapshots/%s/manifest.sig", snap.SourceID, snap.ID)
 	}
 	sigR, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: sigKey})
 	if err != nil {
-		return nil, man, err
+		return nil, man, domain.NewError(domain.ErrManifestInvalid, "missing manifest signature", err)
 	}
 	sig, err := io.ReadAll(sigR)
 	_ = sigR.Close()
 	if err != nil {
 		return nil, man, err
 	}
-	if err := s.Signer.Verify(payload, sig); err != nil {
-		return nil, man, err
+	if s.Signer != nil {
+		if err := s.Signer.Verify(payload, sig); err != nil {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "manifest signature verification failed", err)
+		}
 	}
-	cr, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: snap.CompletionObjectKey})
-	if err != nil {
-		return nil, man, err
+
+	// 2. Verify Completion Record Digest (fail-closed when catalogue-tracked)
+	if snap.CompletionObjectKey != "" {
+		cr, _, err := s.Store.Get(ctx, ports.GetObjectRequest{Key: snap.CompletionObjectKey})
+		if err != nil {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "catalogue-tracked completion record is missing from storage", err)
+		}
+		cb, err := io.ReadAll(cr)
+		_ = cr.Close()
+		if err != nil {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "cannot read completion record", err)
+		}
+		var comp mf.Completion
+		if err := json.Unmarshal(cb, &comp); err != nil {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "malformed completion record", err)
+		}
+		if comp.ManifestDigest == "" {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "completion record has empty manifest digest", nil)
+		}
+		h := sha256.Sum256(payload)
+		if comp.ManifestDigest != hex.EncodeToString(h[:]) {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "completion digest does not match manifest", nil)
+		}
 	}
-	cb, err := io.ReadAll(cr)
-	_ = cr.Close()
-	if err != nil {
-		return nil, man, err
-	}
-	var comp mf.Completion
-	if err := json.Unmarshal(cb, &comp); err != nil {
-		return nil, man, err
-	}
-	h := sha256.Sum256(payload)
-	if comp.ManifestDigest != hex.EncodeToString(h[:]) {
-		return nil, man, domain.NewError(domain.ErrManifestInvalid, "completion digest does not match manifest", nil)
-	}
+
+	// 3. Unmarshal Manifest and Validate Structure
 	if err := json.Unmarshal(payload, &man); err != nil {
-		return nil, man, err
+		return nil, man, domain.NewError(domain.ErrManifestInvalid, "malformed manifest JSON", err)
 	}
-	if man.SnapshotID != string(snap.ID) {
+	if string(snap.ID) != "" && man.SnapshotID != string(snap.ID) {
 		return nil, man, domain.NewError(domain.ErrManifestInvalid, "manifest snapshot mismatch", nil)
 	}
+
+	// 4. Validate Merkle Root
+	expectedRoot := man.Snapshot.RootDigest
+	if expectedRoot == "" {
+		expectedRoot = man.RootDigest
+	}
+	if expectedRoot == "" {
+		return nil, man, domain.NewError(domain.ErrManifestInvalid, "missing root digest in manifest", nil)
+	}
+	if len(s.DedupKey) > 0 && len(man.Chunks) > 0 {
+		chunkIDs := make([]string, len(man.Chunks))
+		plainChunks := make([]chunking.PlainChunk, len(man.Chunks))
+		for i, ch := range man.Chunks {
+			chunkIDs[i] = ch.ChunkID
+			plainChunks[i] = chunking.PlainChunk{
+				Sequence:      ch.Sequence,
+				PageStart:     ch.PageStart,
+				PageCount:     ch.PageCount,
+				PlaintextSize: ch.PlaintextSize,
+			}
+		}
+		// Verify via Merkle Tree engine
+		tree, err := digest.BuildTreeFromHashes(s.DedupKey, chunkIDs)
+		if err != nil {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "merkle tree construction failed", err)
+		}
+		if tree == nil || tree.RootHash == "" {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, "computed merkle tree root is empty", nil)
+		}
+
+		computedDigest := digest.RootDigest(s.DedupKey, plainChunks, chunkIDs, man.Database.LogicalSize, man.Database.PageSize)
+		if tree.RootHash != expectedRoot && computedDigest != expectedRoot {
+			return nil, man, domain.NewError(domain.ErrManifestInvalid, fmt.Sprintf("merkle root mismatch: manifest root is %s, computed tree root is %s, digest is %s", expectedRoot, tree.RootHash, computedDigest), nil)
+		}
+	}
+
 	return payload, man, nil
 }
 

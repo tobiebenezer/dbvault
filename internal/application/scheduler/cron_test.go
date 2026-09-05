@@ -95,3 +95,20 @@ func TestNextAfterDomDowOrRule(t *testing.T) {
 		t.Fatalf("next=%v want=%v", next, want)
 	}
 }
+
+func TestComputeNextFire(t *testing.T) {
+	after := time.Date(2026, 8, 22, 1, 0, 0, 0, time.UTC)
+	next, err := ComputeNextFire("*/10 * * * *", after, time.UTC)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := time.Date(2026, 8, 22, 1, 10, 0, 0, time.UTC)
+	if !next.Equal(want) {
+		t.Fatalf("got %v, want %v", next, want)
+	}
+
+	if _, err := ComputeNextFire("invalid-cron", after, time.UTC); err == nil {
+		t.Fatal("expected error for invalid cron expression")
+	}
+}
+

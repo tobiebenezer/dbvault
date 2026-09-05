@@ -15,6 +15,9 @@ type QueryRequest struct {
 	// (host/credentials from the catalogue) instead of the appliance's
 	// ambient source configuration. Required for ClickHouse.
 	ConnectorID string `json:"connector_id,omitempty"`
+	// TableHint lets live-DB query paths enrich column metadata with real
+	// database types (e.g. via SHOW COLUMNS) instead of assuming TEXT.
+	TableHint string `json:"table_hint,omitempty"`
 }
 
 // ColumnMeta describes a column in the query result.
@@ -25,15 +28,15 @@ type ColumnMeta struct {
 
 // QueryResult holds the structured tabular output of an analytical query.
 type QueryResult struct {
-	Columns      []ColumnMeta     `json:"columns"`
-	Rows         [][]any          `json:"rows"`
-	RowCount     int              `json:"row_count"`
-	ExecutionMs  int64            `json:"execution_ms"`
-	BytesScanned int64            `json:"bytes_scanned"`
-	Engine       string           `json:"engine"`
-	ExecutedAt   time.Time        `json:"executed_at"`
-	Cached       bool             `json:"cached"`
-	Error        string           `json:"error,omitempty"`
+	Columns      []ColumnMeta `json:"columns"`
+	Rows         [][]any      `json:"rows"`
+	RowCount     int          `json:"row_count"`
+	ExecutionMs  int64        `json:"execution_ms"`
+	BytesScanned int64        `json:"bytes_scanned"`
+	Engine       string       `json:"engine"`
+	ExecutedAt   time.Time    `json:"executed_at"`
+	Cached       bool         `json:"cached"`
+	Error        string       `json:"error,omitempty"`
 }
 
 // ConnectorTestResult reports the outcome of one connector connectivity test.
@@ -59,12 +62,12 @@ type TableDataset struct {
 	// CompressionRatio is computed only from actually measured bytes
 	// (raw extraction bytes vs written Parquet file size). It is omitted
 	// entirely when either measurement is missing.
-	CompressionRatio  float64      `json:"compression_ratio,omitempty"`
-	ParquetLocation   string       `json:"parquet_location"`
-	PartitionKey      string       `json:"partition_key,omitempty"`
-	PartitionCount    int          `json:"partition_count"`
-	LastSyncedAt      time.Time    `json:"last_synced_at"`
-	SyncStatus        string       `json:"sync_status"` // "synced", "never_synced"
+	CompressionRatio float64   `json:"compression_ratio,omitempty"`
+	ParquetLocation  string    `json:"parquet_location"`
+	PartitionKey     string    `json:"partition_key,omitempty"`
+	PartitionCount   int       `json:"partition_count"`
+	LastSyncedAt     time.Time `json:"last_synced_at"`
+	SyncStatus       string    `json:"sync_status"` // "synced", "never_synced"
 	// Watermark state and schema provenance, populated only from
 	// catalogue-backed sync evidence (W3). Empty/false means the dataset has
 	// no incremental configuration or no verified schema on record.
@@ -97,9 +100,9 @@ type WarehouseCatalog struct {
 	TotalRawBytes     int64             `json:"total_raw_bytes"`
 	// OverallCompressionRatio is computed only when both total byte counts
 	// were actually measured; otherwise the field is omitted from responses.
-	OverallCompressionRatio float64           `json:"overall_compression_ratio,omitempty"`
-	StorageEngine           string            `json:"storage_engine"`
-	GeneratedAt             time.Time         `json:"generated_at"`
+	OverallCompressionRatio float64   `json:"overall_compression_ratio,omitempty"`
+	StorageEngine           string    `json:"storage_engine"`
+	GeneratedAt             time.Time `json:"generated_at"`
 }
 
 // WarehouseConnector represents an external OLAP sync target (e.g. ClickHouse, Postgres-OLAP).

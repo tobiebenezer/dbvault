@@ -2,17 +2,20 @@ package chunking
 
 import (
 	"context"
-	"github.com/dbvault/dbvault/internal/ports"
 	"io"
 	"os"
+
+	"github.com/dbvault/dbvault/internal/ports"
 )
 
 type PlainChunk struct {
-	Sequence      int
-	PageStart     int64
-	PageCount     int
-	PlaintextSize int64
-	Data          []byte
+	Index          int
+	Sequence       int
+	PageStart      int64
+	PageCount      int
+	PlaintextSize  int64
+	CompressedSize int64
+	Data           []byte
 }
 
 type PageChunker struct{}
@@ -65,7 +68,15 @@ func (PageChunker) Chunks(ctx context.Context, art ports.SnapshotArtifact, targe
 		if n%meta.PageSize != 0 {
 			pc++
 		}
-		out = append(out, PlainChunk{Sequence: seq, PageStart: pageStart, PageCount: pc, PlaintextSize: int64(n), Data: buf[:n]})
+		out = append(out, PlainChunk{
+			Index:          seq,
+			Sequence:       seq,
+			PageStart:      pageStart,
+			PageCount:      pc,
+			PlaintextSize:  int64(n),
+			CompressedSize: int64(n),
+			Data:           buf[:n],
+		})
 		seq++
 		pageStart += int64(pc)
 		if err == io.ErrUnexpectedEOF {

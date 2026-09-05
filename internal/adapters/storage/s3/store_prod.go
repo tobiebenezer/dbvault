@@ -10,8 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path"
+	"net/url"
 	"strings"
 	"time"
 
@@ -32,6 +31,25 @@ type Store struct {
 	Profile Profile
 }
 
+func normalizeEndpoint(endpoint, bucket string) string {
+	ep := strings.TrimSpace(endpoint)
+	if ep == "" {
+		return ""
+	}
+	if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
+		ep = "https://" + ep
+	}
+	if u, err := url.Parse(ep); err == nil {
+		cleanPath := strings.Trim(u.Path, "/")
+		if cleanPath == bucket || strings.HasSuffix(cleanPath, "/"+bucket) || cleanPath == "" || strings.Contains(u.Host, "r2.cloudflarestorage.com") {
+			u.Path = ""
+			u.RawPath = ""
+		}
+		return strings.TrimRight(u.String(), "/")
+	}
+	return strings.TrimRight(ep, "/")
+}
+
 func New(cfg Config, profileName string) *Store {
 	p := BuiltinProfile(profileName)
 	if cfg.Region == "" {
@@ -40,6 +58,7 @@ func New(cfg Config, profileName string) *Store {
 	if p.ForcePathStyle {
 		cfg.UsePathStyle = true
 	}
+	cfg.Endpoint = normalizeEndpoint(cfg.Endpoint, cfg.Bucket)
 	access, _ := readSecret(cfg.AccessKeyID)
 	secret, _ := readSecret(cfg.SecretAccessKey)
 	awsCfg, _ := config.LoadDefaultConfig(context.Background(), config.WithRegion(cfg.Region), config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(access, secret, "")))
@@ -69,10 +88,54 @@ func (s *Store) Put(ctx context.Context, req ports.PutObjectRequest) (ports.Stor
 	if body == nil {
 		body = bytes.NewReader(nil)
 	}
-	in := &s3.PutObjectInput{Bucket: aws.String(s.Config.Bucket), Key: aws.String(key), Body: body, ContentType: aws.String(req.ContentType), Metadata: req.Metadata}
+	in := &s3.PutObjectInput{
+		Bucket:      aws.String(s.Config.Bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		ContentType: aws.String(req.ContentType),
+		Metadata:    req.Metadata,
+	}
 	if req.IfNotExists {
 		in.IfNoneMatch = aws.String("*")
 	}
+
+	// Object Lock Retention Mode & Retain Until Date
+	if req.LockRetention != nil {
+		if req.LockRetention.Mode != "" {
+			in.ObjectLockMode = s3types.ObjectLockMode(strings.ToUpper(req.LockRetention.Mode))
+		}
+		if !req.LockRetention.RetainUntilDate.IsZero() {
+			t := req.LockRetention.RetainUntilDate.UTC()
+			in.ObjectLockRetainUntilDate = &t
+		}
+	} else if req.LockMode != "" {
+		in.ObjectLockMode = s3types.ObjectLockMode(strings.ToUpper(req.LockMode))
+		if req.RetainUntilDate != nil && !req.RetainUntilDate.IsZero() {
+			t := req.RetainUntilDate.UTC()
+			in.ObjectLockRetainUntilDate = &t
+		}
+	}
+
+	// Check Metadata fallbacks for Object Lock if not explicitly set
+	if in.ObjectLockMode == "" && req.Metadata != nil {
+		if m, ok := req.Metadata["dbvault-lock-mode"]; ok && m != "" {
+			in.ObjectLockMode = s3types.ObjectLockMode(strings.ToUpper(m))
+		}
+	}
+	if in.ObjectLockRetainUntilDate == nil && req.Metadata != nil {
+		if u, ok := req.Metadata["dbvault-lock-until"]; ok && u != "" {
+			if parsed, err := time.Parse(time.RFC3339, u); err == nil {
+				utc := parsed.UTC()
+				in.ObjectLockRetainUntilDate = &utc
+			}
+		}
+	}
+
+	// Object Lock Legal Hold
+	if req.LegalHold || (req.Metadata != nil && req.Metadata["dbvault-legal-hold"] == "true") {
+		in.ObjectLockLegalHoldStatus = s3types.ObjectLockLegalHoldStatusOn
+	}
+
 	out, err := s.client.PutObject(ctx, in)
 	if err != nil {
 		var app *domain.AppError
@@ -159,41 +222,6 @@ func (s *Store) Delete(ctx context.Context, key0 string) error {
 	}
 	_, err = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.Config.Bucket), Key: aws.String(key)})
 	return classify(err)
-}
-
-func JoinObjectKey(prefix string, parts ...string) (string, error) {
-	all := []string{}
-	if prefix != "" {
-		all = append(all, prefix)
-	}
-	all = append(all, parts...)
-	joined := path.Clean(strings.Join(all, "/"))
-	joined = strings.TrimPrefix(joined, "/")
-	if joined == "." {
-		return "", nil
-	}
-	for _, seg := range strings.Split(joined, "/") {
-		if seg == ".." || seg == "" {
-			return "", fmt.Errorf("invalid object key")
-		}
-	}
-	return joined, nil
-}
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-func readSecret(v string) (string, error) {
-	if strings.HasPrefix(v, "file:") {
-		b, err := os.ReadFile(strings.TrimPrefix(v, "file:"))
-		return strings.TrimSpace(string(b)), err
-	}
-	if strings.HasPrefix(v, "env:") {
-		return os.Getenv(strings.TrimPrefix(v, "env:")), nil
-	}
-	return v, nil
 }
 
 func classify(err error) error {

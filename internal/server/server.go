@@ -211,6 +211,7 @@ func (a *Appliance) Handler() http.Handler {
 	mux.HandleFunc("/setup/status", a.setupStatus)
 	mux.HandleFunc("/setup/complete", a.setupComplete)
 	mux.HandleFunc("/favicon.ico", a.favicon)
+	mux.HandleFunc("/logo.png", a.logoHandler)
 	mux.HandleFunc("/assets/", a.staticAsset)
 	mux.HandleFunc("/", a.spa)
 	return securityHeaders(limitHeaders(a.authn.Protect(mux)))
@@ -291,7 +292,12 @@ func (a *Appliance) jobEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			events := a.px.GenerateDemoProgress()
+			var events []domain.JobEvent
+			if a.cfg.Demo {
+				events = a.px.GenerateDemoProgress()
+			} else {
+				events = a.px.JobEventsSince(last, 100)
+			}
 			if len(events) == 0 {
 				_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			} else {
@@ -470,13 +476,23 @@ func (a *Appliance) staticAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Appliance) favicon(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#0f172a"><rect width="24" height="24" rx="6"/><path d="M12 4 5 7.5v5.3c0 4.6 3.1 8.8 7.5 9.7 4.4-.9 7.5-5.1 7.5-9.7V7.5z" fill="#ffffff"/></svg>`))
+	http.ServeFileFS(w, r, a.assets, "logo.png")
+}
+
+func (a *Appliance) logoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFileFS(w, r, a.assets, "logo.png")
 }
 
 func (a *Appliance) spa(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if name == "logo.png" || name == "favicon.png" || name == "favicon.ico" {
+			http.ServeFileFS(w, r, a.assets, name)
+			return
+		}
 		if strings.Contains(r.URL.Path, ".") {
 			http.NotFound(w, r)
 			return
@@ -1329,7 +1345,8 @@ func (a *Appliance) databaseExportSQL(w http.ResponseWriter, r *http.Request) {
 		dbID = r.URL.Query().Get("source_id")
 	}
 	if dbID == "" {
-		dbID = "cribx_test"
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "database id or source_id is required"})
+		return
 	}
 	data, filename, err := a.px.ExportDecryptedSQL(r.Context(), dbID)
 	if err != nil {

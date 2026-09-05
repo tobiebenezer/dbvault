@@ -522,6 +522,58 @@ func (s *Service) UpdateDiscoveryStatus(id, status string) (domain.DiscoveredDat
 	return domain.DiscoveredDatabase{}, fmt.Errorf("discovery %q not found", id)
 }
 
+func (s *Service) databaseHasBackupLocked(db domain.DatabaseResource) (bool, int) {
+	if s.demo && (db.ID == "production-postgres" || db.ID == "billing-sqlite") {
+		return true, 3
+	}
+	count := 0
+	// 1. Check local repository on disk
+	repoDir := filepath.Join(s.root, "repository", db.Name)
+	if _, err := os.Stat(filepath.Join(repoDir, "latest_dump.sql")); err == nil {
+		count++
+	}
+	snapsDir := filepath.Join(repoDir, "snapshots")
+	if entries, err := os.ReadDir(snapsDir); err == nil && len(entries) > 0 {
+		for _, e := range entries {
+			if e.IsDir() {
+				count++
+			}
+		}
+	}
+	chunksDir := filepath.Join(repoDir, "chunks")
+	if entries, err := os.ReadDir(chunksDir); err == nil && len(entries) > 0 {
+		if count == 0 {
+			count = 1
+		}
+	}
+	// 2. Check completed backup jobs
+	for _, job := range s.jobs {
+		if job.JobType == "backup" && job.Status == "completed" {
+			if job.ResourceID == db.ID || job.ResourceName == db.Name || job.ResourceID == db.Name {
+				if count == 0 {
+					count = 1
+				}
+			}
+		}
+	}
+	return count > 0, count
+}
+
+func (s *Service) DatabaseHasBackup(dbID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, db := range s.customDatabases {
+		if db.ID == dbID || db.Name == dbID {
+			has, _ := s.databaseHasBackupLocked(db)
+			return has
+		}
+	}
+	if s.demo && (dbID == "production-postgres" || dbID == "billing-sqlite") {
+		return true
+	}
+	return false
+}
+
 func (s *Service) Inventory() domain.ResourceInventory {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -530,15 +582,30 @@ func (s *Service) Inventory() domain.ResourceInventory {
 	var dbList []domain.DatabaseResource
 	var sourceIDs []string
 	if len(s.customDatabases) > 0 {
-		for _, db := range s.customDatabases {
+		for k, db := range s.customDatabases {
+			hasBackup, count := s.databaseHasBackupLocked(db)
+			db.HasBackup = hasBackup
+			db.BackupCount = count
+			if !hasBackup {
+				db.LastBackupAt = time.Time{}
+				db.LastDrillAt = time.Time{}
+				db.Protection = domain.ProtectionUnprotected
+				db.Score = 0
+			} else {
+				db.Protection = domain.ProtectionProtected
+				if db.Score == 0 {
+					db.Score = 100
+				}
+			}
+			s.customDatabases[k] = db
 			dbList = append(dbList, db)
 			sourceIDs = append(sourceIDs, db.ID)
 		}
 		sort.Slice(dbList, func(i, j int) bool { return dbList[i].Name < dbList[j].Name })
 	} else if s.demo {
 		dbList = []domain.DatabaseResource{
-			{ID: "production-postgres", Name: "Production PostgreSQL", Engine: "postgres", Version: "16", Environment: "production", Protection: domain.ProtectionProtected, Score: 84, LastBackupAt: now.Add(-18 * time.Minute), LastDrillAt: now.Add(-48 * time.Hour), DestinationIDs: []string{"r2-primary", "contabo-replica"}, RepositoryID: "production"},
-			{ID: "billing-sqlite", Name: "Billing SQLite", Engine: "sqlite", Version: "3", Environment: "production", Protection: domain.ProtectionProtected, Score: 92, LastBackupAt: now.Add(-41 * time.Minute), LastDrillAt: now.Add(-96 * time.Hour), DestinationIDs: []string{"r2-primary"}, RepositoryID: "production"},
+			{ID: "production-postgres", Name: "Production PostgreSQL", Engine: "postgres", Version: "16", Environment: "production", Protection: domain.ProtectionProtected, Score: 84, LastBackupAt: now.Add(-18 * time.Minute), LastDrillAt: now.Add(-48 * time.Hour), HasBackup: true, BackupCount: 3, DestinationIDs: []string{"r2-primary", "contabo-replica"}, RepositoryID: "production"},
+			{ID: "billing-sqlite", Name: "Billing SQLite", Engine: "sqlite", Version: "3", Environment: "production", Protection: domain.ProtectionProtected, Score: 92, LastBackupAt: now.Add(-41 * time.Minute), LastDrillAt: now.Add(-96 * time.Hour), HasBackup: true, BackupCount: 2, DestinationIDs: []string{"r2-primary"}, RepositoryID: "production"},
 		}
 		sourceIDs = []string{"production-postgres", "billing-sqlite"}
 	} else {

@@ -19,18 +19,18 @@ var (
 
 // Result holds the verification outcome of a PITR drill.
 type Result struct {
-	ID                 string                    `json:"id"`
-	SourceID           domain.SourceID           `json:"source_id"`
-	BaseSnapshotID     domain.SnapshotID         `json:"base_snapshot_id"`
-	TargetTime         time.Time                 `json:"target_time"`
-	Status             domain.VerificationStatus `json:"status"`
-	Duration           time.Duration             `json:"duration"`
+	ID                  string                    `json:"id"`
+	SourceID            domain.SourceID           `json:"source_id"`
+	BaseSnapshotID      domain.SnapshotID         `json:"base_snapshot_id"`
+	TargetTime          time.Time                 `json:"target_time"`
+	Status              domain.VerificationStatus `json:"status"`
+	Duration            time.Duration             `json:"duration"`
 	WALSegmentsReplayed int                       `json:"wal_segments_replayed"`
-	IntegrityPassed    bool                      `json:"integrity_passed"`
-	QuickCheckPassed   bool                      `json:"quick_check_passed"`
-	StartedAt          time.Time                 `json:"started_at"`
-	CompletedAt        *time.Time                `json:"completed_at,omitempty"`
-	ErrorMessage       string                    `json:"error_message,omitempty"`
+	IntegrityPassed     bool                      `json:"integrity_passed"`
+	QuickCheckPassed    bool                      `json:"quick_check_passed"`
+	StartedAt           time.Time                 `json:"started_at"`
+	CompletedAt         *time.Time                `json:"completed_at,omitempty"`
+	ErrorMessage        string                    `json:"error_message,omitempty"`
 }
 
 // Service executes automated point-in-time recovery drills into ephemeral sandbox environments.

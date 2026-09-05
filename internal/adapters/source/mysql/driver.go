@@ -1,10 +1,10 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -46,12 +46,14 @@ func (d *Driver) engine() domain.DatabaseEngine {
 	}
 	return domain.EngineMySQL
 }
+
 func (d *Driver) dumpTool() string {
 	if d.engine() == domain.EngineMariaDB {
 		return "mariadb-dump"
 	}
 	return "mysqldump"
 }
+
 func (d *Driver) clientTool() string {
 	if d.engine() == domain.EngineMariaDB {
 		return "mariadb"
@@ -65,7 +67,18 @@ func (d *Driver) Descriptor() domain.DriverDescriptor {
 	if eng == domain.EngineMariaDB {
 		format = domain.FormatMariaDBSQL
 	}
-	return domain.DriverDescriptor{API: domain.DatabaseDriverAPIV1, Name: string(eng), Engine: eng, SupportedModes: []domain.DatabaseBackupMode{domain.BackupModeLogical}, SupportedFormats: []domain.BackupFormat{format}, SupportsStreaming: true, SupportsParallel: false, SupportsGlobals: false, SupportsSelection: true, SupportsHooks: true}
+	return domain.DriverDescriptor{
+		API:               domain.DatabaseDriverAPIV1,
+		Name:              string(eng),
+		Engine:            eng,
+		SupportedModes:    []domain.DatabaseBackupMode{domain.BackupModeLogical},
+		SupportedFormats:  []domain.BackupFormat{format},
+		SupportsStreaming: true,
+		SupportsParallel:  false,
+		SupportsGlobals:   false,
+		SupportsSelection: true,
+		SupportsHooks:     true,
+	}
 }
 
 func (d *Driver) ValidateSource(ctx context.Context, source domain.Source) error {
@@ -98,14 +111,29 @@ func (d *Driver) DetectToolchain(ctx context.Context, source domain.Source) (dom
 	if err != nil {
 		return domain.Toolchain{}, err
 	}
-	return domain.Toolchain{Engine: d.engine(), ClientVersion: v, ServerVersion: v, ExecutablePaths: map[string]string{"dump": d.dumpTool(), "client": d.clientTool()}, Capabilities: domain.ToolCapabilities{ConsistentSnapshot: true}, DetectedAt: d.now()}, nil
+	return domain.Toolchain{
+		Engine:        d.engine(),
+		ClientVersion: v,
+		ServerVersion: v,
+		ExecutablePaths: map[string]string{
+			"dump":   d.dumpTool(),
+			"client": d.clientTool(),
+		},
+		Capabilities: domain.ToolCapabilities{ConsistentSnapshot: true},
+		DetectedAt:   d.now(),
+	}, nil
 }
 
 func (d *Driver) InspectSource(ctx context.Context, source domain.Source) (domain.DatabaseInspection, error) {
 	if err := d.ValidateSource(ctx, source); err != nil {
 		return domain.DatabaseInspection{}, err
 	}
-	return domain.DatabaseInspection{Engine: d.engine(), EngineVersion: domain.Version{Raw: "unknown"}, Summary: map[string]string{"database": d.Config.Database, "host": d.Config.Host}, Warnings: nil}, nil
+	return domain.DatabaseInspection{
+		Engine:        d.engine(),
+		EngineVersion: domain.Version{Raw: "unknown"},
+		Summary:       map[string]string{"database": d.Config.Database, "host": d.Config.Host},
+		Warnings:      nil,
+	}, nil
 }
 
 func (d *Driver) PlanBackup(ctx context.Context, req ports.BackupPlanRequest) (ports.BackupPlan, error) {
@@ -113,24 +141,55 @@ func (d *Driver) PlanBackup(ctx context.Context, req ports.BackupPlanRequest) (p
 	if d.engine() == domain.EngineMariaDB {
 		format = domain.FormatMariaDBSQL
 	}
-	spec := domain.ArtifactSpec{ID: domain.ArtifactID("mysql-main"), Type: domain.ArtifactDatabaseDump, Name: "database.sql", Format: format, ContentType: "application/sql", Required: true, Sequence: 0}
+	spec := domain.ArtifactSpec{
+		ID:          domain.ArtifactID("mysql-main"),
+		Type:        domain.ArtifactDatabaseDump,
+		Name:        "database.sql",
+		Format:      format,
+		ContentType: "application/sql",
+		Required:    true,
+		Sequence:    0,
+	}
 	return ports.BackupPlan{Engine: d.engine(), Mode: domain.BackupModeLogical, Format: format, Artifacts: []domain.ArtifactSpec{spec}}, nil
 }
 
 func (d *Driver) CreateBackup(ctx context.Context, req ports.BackupRequest, sink ports.ArtifactSink) (domain.BackupSet, error) {
 	started := d.now()
-	set := domain.BackupSet{ID: domain.BackupSetID(string(d.engine()) + "-backup-set"), Engine: d.engine(), EngineVersion: req.Toolchain.ServerVersion.Raw, Toolchain: req.Toolchain, Mode: domain.BackupModeLogical, Format: req.Plan.Format, StartedAt: started, Metadata: map[string]string{"driver": string(d.engine())}, Consistency: domain.ConsistencyMetadata{Method: "single-transaction", StartedAt: started}}
+	set := domain.BackupSet{
+		ID:            domain.BackupSetID(string(d.engine()) + "-backup-set"),
+		Engine:        d.engine(),
+		EngineVersion: req.Toolchain.ServerVersion.Raw,
+		Toolchain:     req.Toolchain,
+		Mode:          domain.BackupModeLogical,
+		Format:        req.Plan.Format,
+		StartedAt:     started,
+		Metadata:      map[string]string{"driver": string(d.engine())},
+		Consistency:   domain.ConsistencyMetadata{Method: "single-transaction", StartedAt: started},
+	}
 	for _, spec := range req.Plan.Artifacts {
 		w, err := sink.OpenArtifact(ctx, spec)
 		if err != nil {
 			return set, err
 		}
 		args := d.dumpArgs()
-		res, err := d.Runner.Run(ctx, ports.ProcessRequest{Executable: d.dumpTool(), Arguments: args, Environment: d.env(), StandardOutput: w, Timeout: 0, Redactions: []string{d.Config.Username}})
+		var stderr bytes.Buffer
+		res, err := d.Runner.Run(ctx, ports.ProcessRequest{
+			Executable:     d.dumpTool(),
+			Arguments:      args,
+			Environment:    d.env(),
+			StandardOutput: w,
+			StandardError:  &stderr,
+			Timeout:        0,
+			Redactions:     d.redactions(),
+		})
 		if err != nil || res.ExitCode != 0 {
 			_ = w.Abort(ctx, err)
 			if err == nil {
-				err = errors.New(res.StdErr)
+				errMsg := strings.TrimSpace(stderr.String())
+				if errMsg == "" {
+					errMsg = res.StdErr
+				}
+				err = errors.New(errMsg)
 			}
 			return set, domain.NewError(domain.ErrDumpFailed, "mysql dump failed", err)
 		}
@@ -148,6 +207,7 @@ func (d *Driver) CreateBackup(ctx context.Context, req ports.BackupRequest, sink
 func (d *Driver) VerifyBackup(ctx context.Context, req ports.BackupVerificationRequest) (domain.VerificationResult, error) {
 	return domain.VerificationResult{Level: domain.VerifyExistence, Status: domain.VerificationSucceeded, StartedAt: d.now()}, nil
 }
+
 func (d *Driver) PlanRestore(ctx context.Context, req ports.RestorePlanRequest) (domain.RestorePlan, error) {
 	ids := make([]domain.ArtifactID, 0, len(req.BackupSet.Artifacts))
 	for _, a := range req.BackupSet.Artifacts {
@@ -157,21 +217,50 @@ func (d *Driver) PlanRestore(ctx context.Context, req ports.RestorePlanRequest) 
 	if d.engine() == domain.EngineMariaDB {
 		target = domain.RestoreTargetMariaDB
 	}
-	return domain.RestorePlan{SnapshotID: req.SourceSnapshot.ID, BackupSetID: req.BackupSet.ID, Engine: d.engine(), TargetType: target, RequiredTools: []string{d.clientTool()}, Artifacts: ids, CreatedAt: d.now()}, nil
+	return domain.RestorePlan{
+		SnapshotID:    req.SourceSnapshot.ID,
+		BackupSetID:   req.BackupSet.ID,
+		Engine:        d.engine(),
+		TargetType:    target,
+		RequiredTools: []string{d.clientTool()},
+		Artifacts:     ids,
+		CreatedAt:     d.now(),
+	}, nil
 }
+
 func (d *Driver) Restore(ctx context.Context, req ports.RestoreRequest, src ports.ArtifactSource) (domain.RestoreResult, error) {
 	for _, id := range req.Plan.Artifacts {
 		rc, _, err := src.OpenArtifact(ctx, id)
 		if err != nil {
 			return domain.RestoreResult{Engine: d.engine()}, err
 		}
-		_, _ = io.Copy(io.Discard, rc)
+		var stderr bytes.Buffer
+		args := d.clientArgs()
+		res, runErr := d.Runner.Run(ctx, ports.ProcessRequest{
+			Executable:    d.clientTool(),
+			Arguments:     args,
+			Environment:   d.env(),
+			StandardInput: rc,
+			StandardError: &stderr,
+			Redactions:    d.redactions(),
+		})
 		_ = rc.Close()
+		if runErr != nil || res.ExitCode != 0 {
+			if runErr == nil {
+				errMsg := strings.TrimSpace(stderr.String())
+				if errMsg == "" {
+					errMsg = res.StdErr
+				}
+				runErr = &domain.AppError{Code: domain.ErrRestoreToolFailed, Message: errMsg}
+			}
+			return domain.RestoreResult{Engine: d.engine()}, domain.NewError(domain.ErrRestoreToolFailed, "mysql restore stream failed", runErr)
+		}
 	}
 	return domain.RestoreResult{SnapshotID: req.Plan.SnapshotID, Engine: d.engine(), Succeeded: true}, nil
 }
+
 func (d *Driver) VerifyRestoredTarget(ctx context.Context, req ports.RestoredTargetVerificationRequest) (domain.VerificationResult, error) {
-	return domain.VerificationResult{Level: domain.VerifySQLiteQuickCheck, Status: domain.VerificationSucceeded, StartedAt: d.now()}, nil
+	return domain.VerificationResult{Level: domain.VerifyExistence, Status: domain.VerificationSucceeded, StartedAt: d.now()}, nil
 }
 
 func (d *Driver) dumpArgs() []string {
@@ -197,29 +286,60 @@ func (d *Driver) dumpArgs() []string {
 	if d.Config.Events {
 		args = append(args, "--events")
 	}
+	args = append(args, "--hex-blob")
 	for _, t := range d.Config.ExcludeTables {
-		args = append(args, "--ignore-table", t)
+		if strings.Contains(t, ".") || d.Config.Database == "" {
+			args = append(args, "--ignore-table="+t)
+		} else {
+			args = append(args, "--ignore-table="+d.Config.Database+"."+t)
+		}
+	}
+	if len(d.Config.ExtraOptions) > 0 {
+		args = append(args, d.Config.ExtraOptions...)
 	}
 	if len(d.Config.IncludeDatabases) > 0 {
 		args = append(args, "--databases")
 		args = append(args, d.Config.IncludeDatabases...)
-	} else {
+	} else if d.Config.Database != "" {
 		args = append(args, d.Config.Database)
 	}
 	return args
 }
+
+func (d *Driver) clientArgs() []string {
+	args := []string{"--user", d.Config.Username}
+	if d.Config.Host != "" {
+		args = append(args, "--host", d.Config.Host, "--port", strconv.Itoa(d.Config.Port))
+	}
+	if d.Config.Socket != "" {
+		args = append(args, "--socket", d.Config.Socket)
+	}
+	if len(d.Config.ExtraOptions) > 0 {
+		args = append(args, d.Config.ExtraOptions...)
+	}
+	if d.Config.Database != "" {
+		args = append(args, d.Config.Database)
+	}
+	return args
+}
+
 func (d *Driver) env() []ports.EnvironmentVariable {
 	pwd, err := d.password()
 	if err != nil {
-		// Callers treat env() as best-effort assembly; ValidateSource is the
-		// loud gate. Never emit a silent empty MYSQL_PWD over TCP, though:
-		// an unresolvable reference yields no credential variable at all.
 		return nil
 	}
 	if pwd == "" {
 		return nil
 	}
 	return []ports.EnvironmentVariable{{Name: "MYSQL_PWD", Value: pwd, Sensitive: true}}
+}
+
+func (d *Driver) redactions() []string {
+	red := make([]string, 0, 2)
+	if pwd, err := d.password(); err == nil && pwd != "" {
+		red = append(red, pwd)
+	}
+	return red
 }
 
 // password resolves Config.Password through the same config secret-reference
@@ -245,6 +365,7 @@ func (d *Driver) password() (string, error) {
 		return "", nil
 	}
 }
+
 func (d *Driver) version(ctx context.Context, exe string) (domain.Version, error) {
 	var out strings.Builder
 	res, err := d.Runner.Run(ctx, ports.ProcessRequest{Executable: exe, Arguments: []string{"--version"}, StandardOutput: &out, Timeout: 10 * time.Second})
@@ -256,6 +377,7 @@ func (d *Driver) version(ctx context.Context, exe string) (domain.Version, error
 	}
 	return parseVersion(out.String()), nil
 }
+
 func parseVersion(s string) domain.Version {
 	fields := strings.Fields(s)
 	raw := s
@@ -278,6 +400,7 @@ func parseVersion(s string) domain.Version {
 	}
 	return v
 }
+
 func numPrefix(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -288,6 +411,7 @@ func numPrefix(s string) string {
 	}
 	return b.String()
 }
+
 func (d *Driver) now() time.Time {
 	if d.Now != nil {
 		return d.Now()

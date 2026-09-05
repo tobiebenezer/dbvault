@@ -3,16 +3,17 @@ import { API } from '../api.js';
 import { Card, Button, Badge, PageHeader, DataTable, SegmentedNav, StatusIndicator, EmptyState, LoadingState, ErrorBox, Icon } from '../components/ui.jsx';
 import { RecoveryTimeline } from '../components/timeline.jsx';
 import { Store } from '../state.js';
-import { formatDate, formatRelative, formatBytes, titleCase } from '../format.js';
+import { formatDate, formatRelative, formatBytes, titleCase, databaseHasBackup } from '../format.js';
 import { ProductActions } from '../actions.js';
 
 export function RecoveryPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState(Store.state.recoveryTab || 'time-travel');
+  const [activeTab, setActiveTab] = useState(Store.state.recoveryTab || 'quick-restore');
   const [restoreReview, setRestoreReview] = useState(Store.state.restoreReview);
   const [targetTime, setTargetTime] = useState('');
+  const [targetDbInput, setTargetDbInput] = useState('');
   const [reason, setReason] = useState('Testing & Verification');
   const [targetEnv, setTargetEnv] = useState('Isolated Sandbox Container (Recommended)');
   const [dryRunResult, setDryRunResult] = useState(null);
@@ -44,6 +45,8 @@ export function RecoveryPage() {
       }
       setData({ inventory, databases, currentSource, timeline });
       setWalStatus(wal);
+      const currentDb = (databases || []).find(d => d.id === currentSource) || databases[0];
+      if (currentDb?.name) setTargetDbInput(currentDb.name);
       setLoading(false);
     } catch (err) {
       if (!isBackground) setError(err);
@@ -96,6 +99,8 @@ export function RecoveryPage() {
 
   const handleSourceChange = (e) => {
     const newId = e.currentTarget.value;
+    const newDb = (databases || []).find((item) => item.id === newId);
+    if (newDb?.name) setTargetDbInput(newDb.name);
     Store.navigate(`/recovery?source=${encodeURIComponent(newId)}`);
     loadData(newId);
   };
@@ -147,17 +152,36 @@ export function RecoveryPage() {
     }
   };
 
+  const hasBackup = databaseHasBackup(source);
+
   return (
     <div className="page">
       <PageHeader
         title="Recovery Studio"
-        description="Point-in-Time Recovery (PITR), continuous WAL stream scrubbing, verified restore drills, and sandbox provisioning."
+        description="Point-in-Time Recovery, direct database restores, verified audit drills, and decrypted SQL exports."
         actions={[
-          <Button key="sql" label="Download Decrypted SQL" onClick={() => API.downloadDecryptedSQL(currentSource)} tone="ghost" icon="download" />,
-          <Button key="cert" label="Compliance Certificate" onClick={() => API.downloadComplianceCertificate(currentSource)} tone="secondary" icon="download" />,
-          <Button key="drill" label="Run Restore Drill" onClick={() => ProductActions.restoreDrill(resource)} tone="secondary" icon="refresh" />,
-          <Button key="sandbox" label="Launch Sandbox" onClick={validateAndSandbox} tone="secondary" icon="play" />,
-          <Button key="restore" label="Restore to Database" onClick={() => setShowRestoreModal(true)} tone="primary" icon="shield" />
+          <Button
+            key="sql"
+            label="Download Decrypted SQL"
+            onClick={() => {
+              if (hasBackup) API.downloadDecryptedSQL(currentSource);
+            }}
+            tone="ghost"
+            icon="download"
+            disabled={!hasBackup}
+            title={!hasBackup ? "No backup available - run a backup first" : "Download decrypted SQL snapshot"}
+          />,
+          <Button
+            key="restore"
+            label="Restore Database"
+            onClick={() => {
+              if (hasBackup) setShowRestoreModal(true);
+            }}
+            tone="primary"
+            icon="shield"
+            disabled={!hasBackup}
+            title={!hasBackup ? "No backup available - run a backup first" : "Restore database"}
+          />
         ]}
       />
 
@@ -167,13 +191,46 @@ export function RecoveryPage() {
         {databases.length > 0 ? (
           <select className="form-select source-select" value={currentSource} onChange={handleSourceChange}>
             {databases.map((db) => (
-              <option key={db.id} value={db.id}>{db.name} ({titleCase(db.engine)})</option>
+              <option key={db.id} value={db.id}>
+                {db.name} ({titleCase(db.engine)}){!databaseHasBackup(db) ? ' · No backup' : ''}
+              </option>
             ))}
           </select>
         ) : (
           <span className="text-muted">No databases protected yet</span>
         )}
       </div>
+
+      {/* Warning banner if selected database has no backup */}
+      {!hasBackup && source && (
+        <div style={{
+          padding: '14px 18px',
+          borderRadius: '8px',
+          background: 'var(--warning-soft, #fffbeb)',
+          border: '1px solid var(--warning, #d97706)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '16px',
+          marginTop: '6px',
+          marginBottom: '6px',
+        }}>
+          <div>
+            <div style={{ fontWeight: 600, color: 'var(--ink, #0f172a)', fontSize: '13px', marginBottom: '2px' }}>
+              No Backup Available for {source.name}
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--muted, #64748b)' }}>
+              This database has not been backed up yet. You must create at least one backup before point-in-time recovery, direct database restore, or SQL export can be performed.
+            </div>
+          </div>
+          <Button
+            label="Back Up Now"
+            tone="primary"
+            icon="play"
+            onClick={() => ProductActions.backup({ id: source.id, name: source.name })}
+          />
+        </div>
+      )}
 
       {/* Real-time WAL Stream Telemetry Bar */}
       {walStatus && (
@@ -209,10 +266,11 @@ export function RecoveryPage() {
 
       <SegmentedNav
         tabs={[
-          { id: 'time-travel', label: 'Time-Travel Recovery & Sandbox' },
-          { id: 'masking', label: 'PII & Data Masking Policy' },
-          { id: 'drills', label: 'Verified Drill Evidence', count: drills.length },
-          { id: 'disaster-plan', label: 'Production Disaster Runbook' }
+          { id: 'quick-restore', label: 'Restore & SQL Export' },
+          { id: 'drills', label: 'Audit Drills & Sandbox', count: drills.length },
+          { id: 'time-travel', label: 'Continuous WAL & Timeline' },
+          { id: 'masking', label: 'PII Data Masking' },
+          { id: 'disaster-plan', label: 'Disaster Recovery Runbook' }
         ]}
         activeId={activeTab}
         onSelect={(tabId) => {
@@ -220,6 +278,119 @@ export function RecoveryPage() {
           Store.set({ recoveryTab: tabId });
         }}
       />
+
+      {activeTab === 'quick-restore' && (
+        <div className="stack-md">
+          <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px' }}>
+            <Card title="Quick Database Restore" subtitle="Replay snapshot directly into original database or a new side-by-side database">
+              <div className="stack-sm">
+                <div className="row-between mb-sm" style={{ padding: '10px 14px', background: 'var(--panel-inset)', borderRadius: '6px' }}>
+                  <span className="text-xs text-muted font-semibold">Source Snapshot</span>
+                  <strong className="cell-mono text-primary font-bold">{source?.name || currentSource}</strong>
+                </div>
+                <div className="form-field">
+                  <div className="row-between mb-xs">
+                    <label className="text-xs">Target Database Name</label>
+                    {targetDbInput.trim() === (source?.name || '') ? (
+                      <Badge label="In-Place Restore" tone="warning" />
+                    ) : (
+                      <Badge label="New Side-by-Side Database" tone="success" />
+                    )}
+                  </div>
+                  <input
+                    className="form-input cell-mono"
+                    value={targetDbInput}
+                    onInput={(e) => setTargetDbInput(e.currentTarget.value)}
+                    placeholder={source?.name || 'database'}
+                  />
+                  <small className="text-muted mt-xs block">
+                    {targetDbInput.trim() === (source?.name || '') ? (
+                      <span>Restores directly into live database <code>{source?.name}</code>.</span>
+                    ) : (
+                      <span>Will create and populate new database <code>{targetDbInput.trim()}</code> and register it in DBVault.</span>
+                    )}
+                  </small>
+                  {targetDbInput.trim() !== (source?.name || '') && (
+                    <div className="mt-xs">
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{ fontSize: '11px', padding: '2px 8px', cursor: 'pointer' }}
+                        onClick={() => setTargetDbInput(source?.name || '')}
+                      >
+                        ↩ Reset to original name ({source?.name})
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="row-actions mt-md">
+                  <Button
+                    label={`Execute Restore → ${targetDbInput.trim() || source?.name}`}
+                    onClick={() => {
+                      if (hasBackup) {
+                        ProductActions.restore({ id: source?.id || currentSource, name: targetDbInput.trim() || source?.name });
+                      }
+                    }}
+                    tone="primary"
+                    icon="shield"
+                    disabled={!hasBackup}
+                    title={!hasBackup ? "No backup available - run a backup first" : "Execute database restore"}
+                  />
+                  <Button
+                    label="More Restore Options…"
+                    onClick={() => {
+                      if (hasBackup) setShowRestoreModal(true);
+                    }}
+                    tone="ghost"
+                    disabled={!hasBackup}
+                    title={!hasBackup ? "No backup available - run a backup first" : "More options"}
+                  />
+                </div>
+              </div>
+            </Card>
+
+            <Card title="Instant Decrypted SQL Export" subtitle="Download plain SQL dump file for local inspection, DBeaver, or manual replay">
+              <div className="stack-sm">
+                <div style={{ padding: '12px 14px', background: 'var(--panel-inset)', borderRadius: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                  Exports the latest verified snapshot, fully decrypted with your Master Key and decompressed into plain standard SQL.
+                </div>
+                <div className="row-actions mt-md">
+                  <Button
+                    label="Download Decrypted .sql File"
+                    onClick={() => {
+                      if (hasBackup) API.downloadDecryptedSQL(currentSource);
+                    }}
+                    tone="secondary"
+                    icon="download"
+                    disabled={!hasBackup}
+                    title={!hasBackup ? "No backup available - run a backup first" : "Download plain SQL dump"}
+                  />
+                  <Button
+                    label="Run Restore Drill"
+                    onClick={() => {
+                      if (hasBackup) ProductActions.restoreDrill(resource);
+                    }}
+                    tone="ghost"
+                    icon="refresh"
+                    disabled={!hasBackup}
+                    title={!hasBackup ? "No backup available - run a backup first" : "Run automated restore drill"}
+                  />
+                  <Button
+                    label="Launch Sandbox"
+                    onClick={() => {
+                      if (hasBackup) validateAndSandbox();
+                    }}
+                    tone="ghost"
+                    icon="play"
+                    disabled={!hasBackup}
+                    title={!hasBackup ? "No backup available - run a backup first" : "Launch ephemeral sandbox"}
+                  />
+                </div>
+              </div>
+            </Card>
+          </div>
+        </div>
+      )}
 
       {activeTab === 'masking' && <MaskingRulesPanel />}
 
@@ -335,19 +506,50 @@ export function RecoveryPage() {
             )}
 
             <div className="row-actions mt-md">
-              <Button label="Restore to Database" onClick={() => setShowRestoreModal(true)} tone="primary" icon="shield" />
-              <Button label="Launch Sandbox Restore" onClick={validateAndSandbox} tone="secondary" icon="play" />
-              <Button label="Download Plain SQL" onClick={() => API.downloadDecryptedSQL(currentSource)} tone="ghost" icon="download" />
+              <Button
+                label="Restore to Database"
+                onClick={() => {
+                  if (hasBackup) setShowRestoreModal(true);
+                }}
+                tone="primary"
+                icon="shield"
+                disabled={!hasBackup}
+                title={!hasBackup ? "No backup available - run a backup first" : "Restore to database"}
+              />
+              <Button
+                label="Launch Sandbox Restore"
+                onClick={() => {
+                  if (hasBackup) validateAndSandbox();
+                }}
+                tone="secondary"
+                icon="play"
+                disabled={!hasBackup}
+                title={!hasBackup ? "No backup available - run a backup first" : "Launch sandbox restore"}
+              />
+              <Button
+                label="Download Plain SQL"
+                onClick={() => {
+                  if (hasBackup) API.downloadDecryptedSQL(currentSource);
+                }}
+                tone="ghost"
+                icon="download"
+                disabled={!hasBackup}
+                title={!hasBackup ? "No backup available - run a backup first" : "Download plain SQL"}
+              />
               <Button
                 label={simulating ? 'Simulating…' : 'Preflight Simulation'}
                 onClick={handleDryRun}
                 tone="ghost"
-                disabled={simulating}
+                disabled={simulating || !hasBackup}
+                title={!hasBackup ? "No backup available - run a backup first" : "Run preflight simulation"}
                 icon="refresh"
               />
               <Button
                 label="Production Replacement"
+                disabled={!hasBackup}
+                title={!hasBackup ? "No backup available - run a backup first" : "Production replacement"}
                 onClick={() => {
+                  if (!hasBackup) return;
                   Store.set({
                     restoreReview: {
                       sourceID: currentSource,
@@ -505,18 +707,23 @@ export function RecoveryPage() {
 }
 
 function RestoreTargetModal({ database, targetTime, onClose, onStartRestore }) {
-  const [targetDb, setTargetDb] = useState(`${database?.name || 'database'}_restored`);
-  const [replaceExisting, setReplaceExisting] = useState(false);
+  const originalName = database?.name || 'database';
+  const [targetDb, setTargetDb] = useState(originalName);
+  const [replaceExisting, setReplaceExisting] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const hasBackup = databaseHasBackup(database);
+
+  const isOriginal = targetDb.trim() === originalName;
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!targetDb.trim()) {
+    const finalTarget = targetDb.trim();
+    if (!finalTarget) {
       Store.toast('Enter a target database name', 'danger');
       return;
     }
     setSubmitting(true);
-    onStartRestore(targetDb.trim());
+    onStartRestore(finalTarget);
   };
 
   return (
@@ -536,30 +743,56 @@ function RestoreTargetModal({ database, targetTime, onClose, onStartRestore }) {
           <div className="metric-card" style={{ padding: '12px', background: 'var(--panel-inset)', borderRadius: '6px' }}>
             <div className="row-between text-xs mb-xs">
               <span className="text-muted">Source Snapshot:</span>
-              <strong className="cell-mono">{database?.name || 'Database'}</strong>
+              <strong className="cell-mono">{originalName}</strong>
             </div>
             <div className="row-between text-xs mb-xs">
               <span className="text-muted">Recovery Point:</span>
-              <span>{targetTime ? new Date(targetTime).toLocaleString() : 'Latest Verified Snapshot (R2)'}</span>
+              <span>{targetTime ? new Date(targetTime).toLocaleString() : 'Latest Verified Snapshot (Cloudflare R2)'}</span>
             </div>
             <div className="row-between text-xs">
-              <span className="text-muted">Decryption Cipher:</span>
-              <Badge label="AEAD AES-256-GCM" tone="success" />
+              <span className="text-muted">Decryption & Compression:</span>
+              <span className="row-xs" style={{ display: 'flex', gap: '6px' }}>
+                <Badge label="AEAD AES-256-GCM" tone="success" />
+                <Badge label="Gzip Decompress" tone="info" />
+              </span>
             </div>
           </div>
 
           <div className="form-field">
-            <label>Target Database Name</label>
+            <div className="row-between mb-xs">
+              <label>Target Database Name</label>
+              {isOriginal ? (
+                <Badge label="In-Place Restore" tone="warning" />
+              ) : (
+                <Badge label="New Side-by-Side Database" tone="success" />
+              )}
+            </div>
             <input
               className="form-input cell-mono"
               value={targetDb}
               onInput={(e) => setTargetDb(e.currentTarget.value)}
-              placeholder="e.g. cribx_restored"
+              placeholder={`e.g. ${originalName}`}
               required
             />
             <small className="text-muted mt-xs block">
-              Default is non-destructive (creates a new side-by-side database). Change to <code>{database?.name}</code> for in-place restore.
+              {isOriginal ? (
+                <span>Restores directly into the original database <code>{originalName}</code>.</span>
+              ) : (
+                <span>Will create and restore into new database <code>{targetDb.trim()}</code> and auto-register it in DBVault.</span>
+              )}
             </small>
+            {!isOriginal && (
+              <div className="mt-xs">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ fontSize: '11px', padding: '2px 8px', cursor: 'pointer' }}
+                  onClick={() => setTargetDb(originalName)}
+                >
+                  ↩ Reset to original name ({originalName})
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="form-field">
@@ -569,13 +802,19 @@ function RestoreTargetModal({ database, targetTime, onClose, onStartRestore }) {
                 checked={replaceExisting}
                 onChange={(e) => setReplaceExisting(e.currentTarget.checked)}
               />
-              <span className="text-xs">Drop & replace existing target database tables if they already exist</span>
+              <span className="text-xs">Overwrite existing tables if target database already exists</span>
             </label>
           </div>
 
           <div className="row-actions">
             <Button type="button" label="Cancel" onClick={onClose} tone="ghost" />
-            <Button type="submit" label={submitting ? "Starting Restore…" : "Execute Restore"} tone="primary" icon="shield" />
+            <Button
+              type="submit"
+              label={submitting ? "Starting Restore…" : (isOriginal ? `Execute In-Place Restore (${originalName})` : `Execute Restore (${targetDb.trim()})`)}
+              tone="primary"
+              icon="shield"
+              disabled={submitting || !hasBackup}
+            />
           </div>
         </form>
       </div>

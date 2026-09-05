@@ -93,6 +93,10 @@ func New(opts Options) *Scheduler {
 	now := opts.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
+		// Store the default back into opts: callers read s.opts.Now()
+		// directly in Run/recoverExpired, so a locally defaulted `now`
+		// alone would leave a nil function behind and panic.
+		opts.Now = now
 	}
 	s := &Scheduler{
 		opts:     opts,

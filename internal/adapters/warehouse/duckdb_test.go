@@ -103,3 +103,58 @@ func TestEngineStatusReflectsHost(t *testing.T) {
 		t.Errorf("Status() = %q, want %q", got, want)
 	}
 }
+
+// TestParseJSONObjectsInOrderPreservesKeyOrder locks the column-order
+// contract: result columns must appear in the exact order the engine emitted
+// them. Decoding into map[string]any randomized that order per run and once
+// broke CSV exports mid-column.
+func TestParseJSONObjectsInOrderPreservesKeyOrder(t *testing.T) {
+	// Keys deliberately NOT alphabetical: zeta first, alpha last.
+	in := []byte(`[
+		{"zeta": 1, "middle": "x", "alpha": true},
+		{"zeta": 2, "middle": "y", "alpha": false}
+	]`)
+	keys, objs, err := parseJSONObjectsInOrder(in)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	want := []string{"zeta", "middle", "alpha"}
+	if len(keys) != len(want) {
+		t.Fatalf("keys=%v want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("key order=%v want %v (order must follow JSON appearance, not map iteration)", keys, want)
+		}
+	}
+	if len(objs) != 2 {
+		t.Fatalf("rows=%d want 2", len(objs))
+	}
+	if got := rawToAny(objs[1]["middle"]); got != "y" {
+		t.Errorf("value decode=%v want y", got)
+	}
+	if got := rawToAny(objs[0]["zeta"]); got != float64(1) {
+		t.Errorf("number decode=%v want 1", got)
+	}
+	if got := rawToAny(objs[0]["alpha"]); got != true {
+		t.Errorf("bool decode=%v want true", got)
+	}
+}
+
+// TestParseJSONObjectsInOrderEmptyAndMalformed covers the degenerate shapes
+// both CLIs can emit.
+func TestParseJSONObjectsInOrderEmptyAndMalformed(t *testing.T) {
+	keys, objs, err := parseJSONObjectsInOrder([]byte("[]"))
+	if err != nil || keys != nil || len(objs) != 0 {
+		t.Fatalf("empty array: keys=%v objs=%v err=%v", keys, objs, err)
+	}
+	if _, _, err := parseJSONObjectsInOrder([]byte(`{"not":"an array"}`)); err == nil {
+		t.Fatal("object input must error")
+	}
+	if _, _, err := parseJSONObjectsInOrder([]byte(`[{"a":`)); err == nil {
+		t.Fatal("truncated input must error")
+	}
+	if v := rawToAny(nil); v != nil {
+		t.Fatalf("rawToAny(nil)=%v want nil", v)
+	}
+}

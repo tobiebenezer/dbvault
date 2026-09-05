@@ -1,4 +1,29 @@
-# DBVault Alpha Install Guide
+# DBVault Install Guide
+
+## Automated VPS Installation (Recommended)
+
+To install DBVault as a hardened `systemd` daemon on your Linux VPS (Ubuntu/Debian/CentOS/AlmaLinux):
+
+### 1. One-Liner Web Installer (Fastest)
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+```
+
+Custom port override (default is **2633**):
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo DBVAULT_PORT=2633 bash
+```
+
+### 2. Standalone Release Package Download
+Download the pre-compiled installer bundle from GitHub releases:
+```bash
+curl -fsSLO https://github.com/tobiebenezer/dbvault/releases/latest/download/dbvault-vps-installer.tar.gz
+mkdir -p dbvault-installer && tar -xzf dbvault-vps-installer.tar.gz -C dbvault-installer
+cd dbvault-installer
+sudo ./install.sh
+```
+
+---
 
 ## Demo mode
 

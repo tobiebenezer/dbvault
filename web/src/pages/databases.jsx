@@ -3,7 +3,7 @@ import { API } from '../api.js';
 import { Card, Button, Badge, PageHeader, DataTable, SegmentedNav, StatusIndicator, EmptyState, LoadingState, ErrorBox, Icon } from '../components/ui.jsx';
 import { Store } from '../state.js';
 import { ProductActions } from '../actions.js';
-import { formatDate, formatRelative, formatBytes, titleCase } from '../format.js';
+import { formatDate, formatRelative, formatBytes, titleCase, databaseHasBackup } from '../format.js';
 
 export function DatabasesPage() {
   const [data, setData] = useState(null);
@@ -192,8 +192,14 @@ export function DatabasesPage() {
                         />
                         <Button
                           label="Restore"
-                          onClick={() => Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`)}
-                          tone="primary compact"
+                          onClick={() => {
+                            if (databaseHasBackup(db)) {
+                              Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`);
+                            }
+                          }}
+                          disabled={!databaseHasBackup(db)}
+                          title={!databaseHasBackup(db) ? "No backup available for this database. Run a backup first." : "Point-In-Time Recovery & Restore"}
+                          tone={databaseHasBackup(db) ? "primary compact" : "ghost compact"}
                           icon="shield"
                         />
                         <Button
@@ -400,9 +406,9 @@ export function DatabaseDetailPage({ dbId }) {
   if (error) return <div className="page"><ErrorBox error={error} retry={loadDatabase} /></div>;
   if (!db) return null;
 
-  const destinations = (inventory?.destinations || []).filter((d) =>
-    (db.destination_ids || []).includes(d.id)
-  );
+  const allDestinations = inventory?.destinations || [];
+  const matched = allDestinations.filter((d) => (db.destination_ids || []).includes(d.id));
+  const destinations = matched.length > 0 ? matched : allDestinations;
 
   return (
     <div className="page">
@@ -411,7 +417,18 @@ export function DatabaseDetailPage({ dbId }) {
         description={`${titleCase(db.engine)} ${db.version || ''} · ${titleCase(db.environment || 'production')} · ID: ${db.id}`}
         actions={[
           <Button key="back" label="All Databases" onClick={() => Store.navigate('/databases')} tone="ghost" icon="arrow-left" />,
-          <Button key="restore" label="Point-In-Time Recovery" onClick={() => Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`)} tone="secondary" />,
+          <Button
+            key="restore"
+            label="Point-In-Time Recovery"
+            onClick={() => {
+              if (databaseHasBackup(db)) {
+                Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`);
+              }
+            }}
+            disabled={!databaseHasBackup(db)}
+            title={!databaseHasBackup(db) ? "No backup available for this database. Run a backup first." : "Point-In-Time Recovery & Restore"}
+            tone={databaseHasBackup(db) ? "secondary" : "ghost"}
+          />,
           <Button key="backup" label="Back Up Now" onClick={() => ProductActions.backup({ id: db.id, name: db.name })} tone="primary" icon="play" />
         ]}
       />
@@ -697,6 +714,8 @@ function EngineProbeModal({ onClose, onAdopted }) {
         host: host.trim(),
         port: Number(port),
         username: username.trim(),
+        password: password,
+        path: path.trim(),
         environment,
         databases: selectedDbs
       });

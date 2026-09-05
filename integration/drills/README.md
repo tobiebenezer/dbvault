@@ -13,12 +13,15 @@ assertion here has a failure mode the harness actively checks.
 | `filesystem-roundtrip.sh` | IT-E1 | SQLite -> filesystem repository -> corrupt original -> verified restore. Exercises chunking, zstd, AES-GCM via real key material, ed25519-signed manifests, download + decrypt + verify. |
 | `mysql-roundtrip.sh` | IT-M1 | MySQL 8.4 (Docker) -> host `mysqldump` logical snapshot -> DROP all tables -> restore SQL into a second clean MySQL container -> extended table checksum comparison. Includes a negative leg: a wrong password must fail the backup loudly at dump time. |
 | `minio-roundtrip.sh` | IT-E2 | SQLite -> live MinIO S3 endpoint (path-style, file-referenced credentials) -> corrupt original -> verified restore from object storage. |
+| `warehouse-roundtrip.sh` | IT-W1 | MySQL 8.4 (Docker) -> durable warehouse sync through the job queue -> schema-verified partitioned Parquet lakehouse -> evidence-backed catalog, read-only query guard, incremental watermark append, masked export, scoped Power BI feed, audit trail, and a loud unknown-connector failure. |
 
 ## Requirements
 
 - Go toolchain (production build needs CGO for the SQLite catalogue driver)
 - Docker with `mysql:8.4`, `minio/minio`, and `minio/mc` images available
 - Host `mysqldump`/`mysql` client 8.x and `sqlite3` CLI
+- `warehouse-roundtrip.sh` additionally needs the `duckdb` CLI (in `PATH` or
+  it downloads the official CLI into the shared drill cache)
 
 ## Running
 
@@ -26,6 +29,7 @@ assertion here has a failure mode the harness actively checks.
 ./integration/drills/filesystem-roundtrip.sh
 ./integration/drills/mysql-roundtrip.sh     # ports default 33306/33307, override ITM1_SRC_PORT/ITM1_DST_PORT
 ./integration/drills/minio-roundtrip.sh     # port default 39000, override ITE2_MINIO_PORT
+./integration/drills/warehouse-roundtrip.sh # ports default 33308/38081, override ITW1_SRC_PORT/ITW1_SRV_PORT
 ```
 
 Each run prints `[drill]` progress lines and finishes with `PASS: <id>` or

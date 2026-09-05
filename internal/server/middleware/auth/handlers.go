@@ -3,7 +3,9 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -13,6 +15,10 @@ import (
 // issuance. setupTokenVerify checks the one-time token; consumeSetupToken is
 // called only after the administrator has been created successfully.
 func (m *Middleware) RegisterPublic(mux *http.ServeMux, setupTokenVerify func(token string) error, consumeSetupToken func() error) {
+	mux.HandleFunc("GET /api/v1/auth/bootstrap-status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"bootstrapped": m.store.Bootstrapped()})
+	})
+
 	mux.HandleFunc("POST /api/v1/auth/bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		if !m.admitLoginAttempt(r) {
 			writeJSONError(w, http.StatusTooManyRequests, "too many attempts; retry later")
@@ -55,7 +61,7 @@ func (m *Middleware) RegisterPublic(mux *http.ServeMux, setupTokenVerify func(to
 			writeJSONError(w, http.StatusInternalServerError, "administrator created but session failed")
 			return
 		}
-		setSessionCookie(w, sessionID, expires)
+		setSessionCookie(w, r, sessionID, expires)
 		writeJSON(w, http.StatusCreated, map[string]any{"status": "administrator-created", "username": strings.TrimSpace(req.Username)})
 	})
 
@@ -77,7 +83,7 @@ func (m *Middleware) RegisterPublic(mux *http.ServeMux, setupTokenVerify func(to
 			writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
-		setSessionCookie(w, sessionID, expires)
+		setSessionCookie(w, r, sessionID, expires)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "authenticated", "expires_at": expires})
 	})
 
@@ -110,7 +116,8 @@ func (m *Middleware) RegisterProtected(mux *http.ServeMux) {
 		if c, err := r.Cookie(sessionCookie); err == nil {
 			m.store.Logout(c.Value)
 		}
-		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+		secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 		writeJSON(w, http.StatusOK, map[string]string{"status": "logged-out"})
 	})
 
@@ -120,15 +127,35 @@ func (m *Middleware) RegisterProtected(mux *http.ServeMux) {
 	})
 }
 
-func setSessionCookie(w http.ResponseWriter, value string, expires time.Time) {
+func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, expires time.Time) {
+	secure := true
+	sameSite := http.SameSiteStrictMode
+	if r != nil {
+		if r.Header.Get("X-Forwarded-Proto") == "http" || os.Getenv("DBVAULT_INSECURE_COOKIE") == "true" || r.Header.Get("X-Insecure-Cookie") == "true" {
+			secure = false
+			sameSite = http.SameSiteLaxMode
+		} else if host, _, err := net.SplitHostPort(r.Host); err == nil {
+			if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+				if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+					secure = false
+					sameSite = http.SameSiteLaxMode
+				}
+			}
+		} else if ip := net.ParseIP(r.Host); ip != nil && !ip.IsLoopback() {
+			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+				secure = false
+				sameSite = http.SameSiteLaxMode
+			}
+		}
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    value,
 		Path:     "/",
 		Expires:  expires,
 		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+		SameSite: sameSite,
 	})
 }
 

@@ -10,16 +10,17 @@ import (
 )
 
 type Catalogue struct {
-	mu                sync.Mutex
-	runs              map[domain.BackupRunID]domain.BackupRun
-	snaps             map[domain.SnapshotID]domain.Snapshot
-	snapChunks        map[domain.SnapshotID][]domain.SnapshotChunk
-	chunks            map[domain.ChunkID]domain.Chunk
-	warehouseDatasets map[string]domain.WarehouseDataset
+	mu                  sync.Mutex
+	runs                map[domain.BackupRunID]domain.BackupRun
+	snaps               map[domain.SnapshotID]domain.Snapshot
+	snapChunks          map[domain.SnapshotID][]domain.SnapshotChunk
+	chunks              map[domain.ChunkID]domain.Chunk
+	warehouseDatasets   map[string]domain.WarehouseDataset
+	warehouseConnectors map[string]domain.WarehouseConnectorRecord
 }
 
 func New() *Catalogue {
-	return &Catalogue{runs: map[domain.BackupRunID]domain.BackupRun{}, snaps: map[domain.SnapshotID]domain.Snapshot{}, snapChunks: map[domain.SnapshotID][]domain.SnapshotChunk{}, chunks: map[domain.ChunkID]domain.Chunk{}, warehouseDatasets: map[string]domain.WarehouseDataset{}}
+	return &Catalogue{runs: map[domain.BackupRunID]domain.BackupRun{}, snaps: map[domain.SnapshotID]domain.Snapshot{}, snapChunks: map[domain.SnapshotID][]domain.SnapshotChunk{}, chunks: map[domain.ChunkID]domain.Chunk{}, warehouseDatasets: map[string]domain.WarehouseDataset{}, warehouseConnectors: map[string]domain.WarehouseConnectorRecord{}}
 }
 func (c *Catalogue) CreateBackupRun(ctx context.Context, run domain.BackupRun) error {
 	c.mu.Lock()
@@ -98,5 +99,40 @@ func (c *Catalogue) ListWarehouseDatasets(ctx context.Context, databaseID string
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastSyncAt.After(out[j].LastSyncAt) })
+	return out, nil
+}
+
+func (c *Catalogue) UpsertWarehouseConnector(ctx context.Context, conn domain.WarehouseConnectorRecord) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warehouseConnectors[conn.ID] = conn
+	return nil
+}
+
+func (c *Catalogue) GetWarehouseConnector(ctx context.Context, id string) (domain.WarehouseConnectorRecord, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	conn, ok := c.warehouseConnectors[id]
+	return conn, ok, nil
+}
+
+func (c *Catalogue) DeleteWarehouseConnector(ctx context.Context, id string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.warehouseConnectors[id]; !ok {
+		return false, nil
+	}
+	delete(c.warehouseConnectors, id)
+	return true, nil
+}
+
+func (c *Catalogue) ListWarehouseConnectors(ctx context.Context) ([]domain.WarehouseConnectorRecord, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []domain.WarehouseConnectorRecord{}
+	for _, conn := range c.warehouseConnectors {
+		out = append(out, conn)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }

@@ -20,3 +20,12 @@ type ManifestSigner interface {
 	Sign(payload []byte) ([]byte, error)
 	Verify(payload, signature []byte) error
 }
+
+type ChunkMetadata struct {
+	Index          int
+	Sequence       int
+	PlaintextSize  int64
+	CompressedSize int64
+	ChunkID        string
+	ObjectKey      string
+}

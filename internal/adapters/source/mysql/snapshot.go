@@ -59,12 +59,16 @@ func (s *SnapshotSource) CreateSnapshot(ctx context.Context, req ports.SnapshotR
 		Environment:    s.Driver.env(),
 		StandardOutput: io.MultiWriter(f, hasher),
 		StandardError:  &stderr,
-		Redactions:     []string{s.Driver.Config.Username},
+		Redactions:     s.Driver.redactions(),
 	})
 	closeErr := f.Close()
 	digest := hex.EncodeToString(hasher.Sum(nil))
 	if runErr == nil && res.ExitCode != 0 {
-		runErr = &domain.AppError{Code: domain.ErrDumpFailed, Message: strings.TrimSpace(stderr.String())}
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg == "" {
+			errMsg = res.StdErr
+		}
+		runErr = &domain.AppError{Code: domain.ErrDumpFailed, Message: errMsg}
 	}
 	if runErr != nil || closeErr != nil {
 		_ = os.Remove(out)

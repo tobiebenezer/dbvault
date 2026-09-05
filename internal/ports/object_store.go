@@ -14,15 +14,25 @@ type StorageCapabilities struct {
 	RangeReads            bool
 	PathStyleAddressing   bool
 	VirtualHostAddressing bool
+	ObjectLock            bool
+}
+
+type ObjectLockRetention struct {
+	Mode            string // "COMPLIANCE" or "GOVERNANCE"
+	RetainUntilDate time.Time
 }
 
 type PutObjectRequest struct {
-	Key         string
-	Body        io.Reader
-	Size        int64
-	ContentType string
-	Metadata    map[string]string
-	IfNotExists bool
+	Key             string
+	Body            io.Reader
+	Size            int64
+	ContentType     string
+	Metadata        map[string]string
+	IfNotExists     bool
+	LockRetention   *ObjectLockRetention
+	LegalHold       bool
+	LockMode        string     // "COMPLIANCE" or "GOVERNANCE"
+	RetainUntilDate *time.Time // WORM retention expiration
 }
 
 type StoredObject struct {

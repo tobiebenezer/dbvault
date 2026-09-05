@@ -9,11 +9,16 @@ lakehouse/
 *.db-shm
 
 
-bin/
-dist/
+/bin/
+/dist/
 web/node_modules/
 .opencode/
 scratch/
+.local-test-vault/
+/dbvault-restore
+.agents/
 
-# web/dist is a go:embed build input - must stay tracked
+# web/dist and internal/server/web/dist are go:embed build inputs - must stay tracked
 !web/dist/
+!internal/server/web/dist/
+

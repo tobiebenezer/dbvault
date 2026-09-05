@@ -21,6 +21,7 @@ import (
 
 	s3adapter "github.com/dbvault/dbvault/internal/adapters/storage/s3"
 	"github.com/dbvault/dbvault/internal/application/garbagecollection"
+	"github.com/dbvault/dbvault/internal/application/scheduler"
 	"github.com/dbvault/dbvault/internal/domain"
 	"github.com/dbvault/dbvault/internal/ports"
 )
@@ -1005,6 +1006,10 @@ func (s *Service) CreateSchedule(sourceID, name, cronExp, bType, retTag, comp st
 	defer s.mu.Unlock()
 	now := s.now()
 	id := fmt.Sprintf("sched-%d", now.UnixNano())
+	nextRun := now.Add(4 * time.Hour)
+	if next, err := scheduler.ComputeNextFire(cronExp, now, time.UTC); err == nil && !next.IsZero() {
+		nextRun = next
+	}
 	sc := BackupSchedule{
 		ID:             id,
 		SourceID:       sourceID,
@@ -1016,11 +1021,12 @@ func (s *Service) CreateSchedule(sourceID, name, cronExp, bType, retTag, comp st
 		Compression:    comp,
 		RateLimitMBPS:  rateLimit,
 		Enabled:        true,
-		NextRunAt:      now.Add(4 * time.Hour),
+		NextRunAt:      nextRun,
 		LastStatus:     "pending",
 		CreatedAt:      now,
 	}
 	s.schedules[id] = sc
+	s.savePersistedDataLocked()
 	return sc, nil
 }
 
@@ -1041,6 +1047,9 @@ func (s *Service) UpdateSchedule(id string, enabled *bool, name, cronExp, bType,
 	if cronExp != "" {
 		sc.CronExpression = cronExp
 		sc.FrequencyLabel = "Custom (" + cronExp + ")"
+		if next, err := scheduler.ComputeNextFire(cronExp, s.now(), time.UTC); err == nil && !next.IsZero() {
+			sc.NextRunAt = next
+		}
 	}
 	if bType != "" {
 		sc.BackupType = bType
@@ -1049,6 +1058,7 @@ func (s *Service) UpdateSchedule(id string, enabled *bool, name, cronExp, bType,
 		sc.RetentionTag = retTag
 	}
 	s.schedules[id] = sc
+	s.savePersistedDataLocked()
 	return sc, nil
 }
 
@@ -1060,6 +1070,7 @@ func (s *Service) DeleteSchedule(id string) error {
 		return fmt.Errorf("schedule %s not found", id)
 	}
 	delete(s.schedules, id)
+	s.savePersistedDataLocked()
 	return nil
 }
 
@@ -1072,6 +1083,7 @@ func (s *Service) TriggerScheduleNow(id string) (domain.JobView, error) {
 		sc.LastRunAt = &now
 		sc.LastStatus = "running"
 		s.schedules[id] = sc
+		s.savePersistedDataLocked()
 	}
 	s.mu.Unlock()
 	if !ok {
@@ -1348,6 +1360,11 @@ func (s *Service) DatabaseSchema(dbID string) DatabaseSchemaView {
 		}
 	}
 
+	engine, host, port, user, pass, path := s.resolveResourceParams(&targetDB, engine)
+	if path != "" {
+		dbPath = path
+	}
+
 	isExcluded := func(name string) bool {
 		for _, e := range excluded {
 			if e == name {
@@ -1360,7 +1377,7 @@ func (s *Service) DatabaseSchema(dbID string) DatabaseSchemaView {
 	var tables []TableMetric
 	switch engine {
 	case "postgres", "postgresql":
-		realTables, err := inspectPostgresLiveTables(dbName)
+		realTables, err := inspectPostgresLiveTables(dbName, host, port, user, pass)
 		if err == nil && len(realTables) > 0 {
 			for _, t := range realTables {
 				t.Excluded = isExcluded(t.Name)
@@ -1385,7 +1402,7 @@ func (s *Service) DatabaseSchema(dbID string) DatabaseSchemaView {
 		}
 
 	case "mysql", "mariadb":
-		realTables, err := inspectMySQLLiveTables(dbName)
+		realTables, err := inspectMySQLLiveTables(dbName, host, port, user, pass)
 		if err == nil && len(realTables) > 0 {
 			for _, t := range realTables {
 				t.Excluded = isExcluded(t.Name)
@@ -1429,35 +1446,34 @@ func (s *Service) DatabaseSchema(dbID string) DatabaseSchemaView {
 	}
 }
 
-func inspectPostgresLiveTables(dbName string) ([]TableMetric, error) {
-	host := os.Getenv("PGHOST")
+func inspectPostgresLiveTables(dbName, host string, port int, user, pass string) ([]TableMetric, error) {
 	if host == "" {
-		host = "127.0.0.1"
+		host = os.Getenv("PGHOST")
+		if host == "" {
+			host = "127.0.0.1"
+		}
 	}
-	port := os.Getenv("PGPORT")
-	if port == "" {
-		port = "5432"
+	portStr := strconv.Itoa(port)
+	if port == 0 {
+		portStr = os.Getenv("PGPORT")
+		if portStr == "" {
+			portStr = "5432"
+		}
 	}
-	user := os.Getenv("PGUSER")
 	if user == "" {
-		user = "postgres"
+		user = os.Getenv("PGUSER")
+		if user == "" {
+			user = "postgres"
+		}
 	}
-	pass := os.Getenv("PGPASSWORD")
-
-	if dbURL := os.Getenv("DBVAULT_DATABASE_URL"); dbURL != "" {
-		if u, err := url.Parse(dbURL); err == nil {
-			if u.Hostname() != "" {
-				host = u.Hostname()
-			}
-			if u.Port() != "" {
-				port = u.Port()
-			}
-			if u.User != nil {
-				if un := u.User.Username(); un != "" {
-					user = un
-				}
-				if pw, ok := u.User.Password(); ok {
-					pass = pw
+	if pass == "" {
+		pass = os.Getenv("PGPASSWORD")
+		if pass == "" {
+			if dbURL := os.Getenv("DBVAULT_DATABASE_URL"); dbURL != "" {
+				if u, err := url.Parse(dbURL); err == nil && u.User != nil {
+					if pw, ok := u.User.Password(); ok {
+						pass = pw
+					}
 				}
 			}
 		}
@@ -1467,7 +1483,7 @@ func inspectPostgresLiveTables(dbName string) ([]TableMetric, error) {
 				host = u.Hostname()
 			}
 			if u.Port() != "" {
-				port = u.Port()
+				portStr = u.Port()
 			}
 			if u.User != nil {
 				if un := u.User.Username(); un != "" {
@@ -1495,7 +1511,7 @@ ORDER BY (pg_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.t
 	cmd := exec.Command("psql",
 		"-w",
 		"-h", host,
-		"-p", port,
+		"-p", portStr,
 		"-U", user,
 		"-d", dbName,
 		"-t", "-A", "-F", ",",
@@ -1524,9 +1540,9 @@ ORDER BY (pg_relation_size(quote_ident(t.table_schema) || '.' || quote_ident(t.t
 			dataSize, _ := strconv.ParseInt(parts[2], 10, 64)
 			idxSize, _ := strconv.ParseInt(parts[3], 10, 64)
 			tables = append(tables, TableMetric{
-				Name:          name,
-				EstimatedRows: rows,
-				DataSizeBytes: dataSize,
+				Name:           name,
+				EstimatedRows:  rows,
+				DataSizeBytes:  dataSize,
 				IndexSizeBytes: idxSize,
 			})
 		}
@@ -1559,9 +1575,9 @@ func inspectSQLiteLiveTables(path, dbName string) ([]TableMetric, error) {
 		trimmed := strings.TrimSpace(name)
 		if trimmed != "" {
 			tables = append(tables, TableMetric{
-				Name:          trimmed,
-				EstimatedRows: 100,
-				DataSizeBytes: fileSize / tableCount,
+				Name:           trimmed,
+				EstimatedRows:  100,
+				DataSizeBytes:  fileSize / tableCount,
 				IndexSizeBytes: 4096,
 			})
 		}
@@ -1569,58 +1585,61 @@ func inspectSQLiteLiveTables(path, dbName string) ([]TableMetric, error) {
 	return tables, nil
 }
 
-func inspectMySQLLiveTables(dbName string) ([]TableMetric, error) {
-	host := "127.0.0.1"
-	port := 3306
-	user := "root"
-	pass := ""
-
-	for _, envKey := range []string{"DBVAULT_MYSQL_URL", "MYSQL_URL", "MYSQL_DATABASE_URL"} {
-		if val := os.Getenv(envKey); val != "" {
-			if u, err := url.Parse(val); err == nil {
-				if u.Hostname() != "" {
-					host = u.Hostname()
-				}
-				if u.Port() != "" {
-					if p, err := strconv.Atoi(u.Port()); err == nil {
-						port = p
+func inspectMySQLLiveTables(dbName, host string, port int, user, pass string) ([]TableMetric, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 3306
+	}
+	if user == "" {
+		user = "root"
+	}
+	if pass == "" {
+		for _, envKey := range []string{"DBVAULT_MYSQL_URL", "MYSQL_URL", "MYSQL_DATABASE_URL"} {
+			if val := os.Getenv(envKey); val != "" {
+				if u, err := url.Parse(val); err == nil {
+					if u.Hostname() != "" {
+						host = u.Hostname()
 					}
-				}
-				if u.User != nil {
-					if un := u.User.Username(); un != "" {
-						user = un
+					if u.Port() != "" {
+						if p, err := strconv.Atoi(u.Port()); err == nil {
+							port = p
+						}
 					}
-					if pw, ok := u.User.Password(); ok {
-						pass = pw
+					if u.User != nil {
+						if un := u.User.Username(); un != "" {
+							user = un
+						}
+						if pw, ok := u.User.Password(); ok {
+							pass = pw
+						}
 					}
+					break
 				}
-				break
 			}
 		}
-	}
-	if h := os.Getenv("MYSQL_HOST"); h != "" {
-		host = h
-	}
-	if p := os.Getenv("MYSQL_PORT"); p != "" {
-		if val, err := strconv.Atoi(p); err == nil {
-			port = val
+		if h := os.Getenv("MYSQL_HOST"); h != "" && host == "127.0.0.1" {
+			host = h
 		}
-	}
-	if u := os.Getenv("MYSQL_USER"); u != "" {
-		user = u
-	}
-	if pw := os.Getenv("MYSQL_PWD"); pw != "" {
-		pass = pw
-	}
-
-	// Also accept MYSQL_PASSWORD as common alias for MYSQL_PWD
-	if pw := os.Getenv("MYSQL_PASSWORD"); pw != "" && pass == "" {
-		pass = pw
-	}
-	// Also accept PGPASSWORD as a last-resort shared secret on single-host setups
-	if pass == "" {
-		if pw := os.Getenv("PGPASSWORD"); pw != "" {
+		if p := os.Getenv("MYSQL_PORT"); p != "" && port == 3306 {
+			if val, err := strconv.Atoi(p); err == nil {
+				port = val
+			}
+		}
+		if u := os.Getenv("MYSQL_USER"); u != "" && user == "root" {
+			user = u
+		}
+		if pw := os.Getenv("MYSQL_PWD"); pw != "" {
 			pass = pw
+		}
+		if pw := os.Getenv("MYSQL_PASSWORD"); pw != "" && pass == "" {
+			pass = pw
+		}
+		if pass == "" {
+			if pw := os.Getenv("PGPASSWORD"); pw != "" {
+				pass = pw
+			}
 		}
 	}
 
@@ -1696,7 +1715,6 @@ func inspectMySQLLiveTables(dbName string) ([]TableMetric, error) {
 	}
 	return tables, nil
 }
-
 
 // TestRemoteURI parses and verifies a remote database URI.
 func (s *Service) TestRemoteURI(engine, rawURI string) (map[string]any, error) {
@@ -1788,7 +1806,7 @@ func (s *Service) DispatchTestNotification(ctx context.Context, channelID, targe
 
 // EngineProbeRequest holds parameters to probe a database engine.
 type EngineProbeRequest struct {
-	Engine   string `json:"engine"`   // "postgres", "mysql", "sqlite"
+	Engine   string `json:"engine"` // "postgres", "mysql", "sqlite"
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	Username string `json:"username"`
@@ -1832,6 +1850,8 @@ type AdoptDatabasesRequest struct {
 	Host        string                   `json:"host"`
 	Port        int                      `json:"port"`
 	Username    string                   `json:"username"`
+	Password    string                   `json:"password,omitempty"`
+	Path        string                   `json:"path,omitempty"`
 	Environment string                   `json:"environment"`
 	Databases   []DiscoveredDatabaseInfo `json:"databases"`
 }
@@ -2272,18 +2292,40 @@ func (s *Service) AdoptDiscoveredDatabases(ctx context.Context, req AdoptDatabas
 		if id == "" {
 			id = fmt.Sprintf("%s-%s", req.Engine, strings.ToLower(d.Name))
 		}
+		filePath := d.Path
+		if filePath == "" && req.Path != "" {
+			filePath = req.Path
+		}
+		hasBackup, count := s.databaseHasBackupLocked(domain.DatabaseResource{Name: d.Name, ID: id})
+		prot := domain.ProtectionUnprotected
+		score := 0
+		var lastBackup time.Time
+		var lastDrill time.Time
+		if hasBackup {
+			prot = domain.ProtectionProtected
+			score = 100
+			lastBackup = now
+			lastDrill = now
+		}
 		dbRes := domain.DatabaseResource{
 			ID:             id,
 			Name:           d.Name,
 			Engine:         req.Engine,
 			Version:        "16",
 			Environment:    env,
-			Protection:     domain.ProtectionProtected,
-			Score:          100,
-			LastBackupAt:   now,
-			LastDrillAt:    now,
+			Protection:     prot,
+			Score:          score,
+			LastBackupAt:   lastBackup,
+			LastDrillAt:    lastDrill,
+			HasBackup:      hasBackup,
+			BackupCount:    count,
 			DestinationIDs: []string{"r2-primary", "contabo-replica"},
 			RepositoryID:   "production",
+			Host:           req.Host,
+			Port:           req.Port,
+			Username:       req.Username,
+			Password:       req.Password,
+			Path:           filePath,
 		}
 		s.customDatabases[id] = dbRes
 		adopted = append(adopted, dbRes)
@@ -2297,7 +2339,6 @@ func (s *Service) AdoptDiscoveredDatabases(ctx context.Context, req AdoptDatabas
 func (s *Service) AddCustomDatabase(ctx context.Context, db domain.DatabaseResource) (domain.DatabaseResource, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
 
 	if db.ID == "" {
 		db.ID = fmt.Sprintf("%s-%s", db.Engine, strings.ToLower(db.Name))
@@ -2305,14 +2346,22 @@ func (s *Service) AddCustomDatabase(ctx context.Context, db domain.DatabaseResou
 	if db.Environment == "" {
 		db.Environment = "production"
 	}
-	if db.Protection == "" {
-		db.Protection = domain.ProtectionProtected
+	hasBackup, count := s.databaseHasBackupLocked(db)
+	db.HasBackup = hasBackup
+	db.BackupCount = count
+	if !hasBackup {
+		db.Protection = domain.ProtectionUnprotected
+		db.Score = 0
+		db.LastBackupAt = time.Time{}
+		db.LastDrillAt = time.Time{}
+	} else {
+		if db.Protection == "" {
+			db.Protection = domain.ProtectionProtected
+		}
+		if db.Score == 0 {
+			db.Score = 100
+		}
 	}
-	if db.Score == 0 {
-		db.Score = 100
-	}
-	db.LastBackupAt = now
-	db.LastDrillAt = now
 	if len(db.DestinationIDs) == 0 {
 		db.DestinationIDs = []string{"r2-primary"}
 	}
@@ -2360,12 +2409,32 @@ type StorageTestResult struct {
 	ErrorMessage  string `json:"error_message,omitempty"`
 }
 
+func normalizeStorageEndpoint(endpoint, bucket string) string {
+	ep := strings.TrimSpace(endpoint)
+	if ep == "" {
+		return ""
+	}
+	if !strings.HasPrefix(ep, "http://") && !strings.HasPrefix(ep, "https://") {
+		ep = "https://" + ep
+	}
+	if u, err := url.Parse(ep); err == nil {
+		cleanPath := strings.Trim(u.Path, "/")
+		if cleanPath == bucket || strings.HasSuffix(cleanPath, "/"+bucket) || cleanPath == "" || strings.Contains(u.Host, "r2.cloudflarestorage.com") {
+			u.Path = ""
+			u.RawPath = ""
+		}
+		return strings.TrimRight(u.String(), "/")
+	}
+	return strings.TrimRight(ep, "/")
+}
+
 // AddStorageDestination registers and activates a storage destination.
 func (s *Service) AddStorageDestination(ctx context.Context, input StorageDestinationInput) (domain.DestinationResource, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
 
+	input.Endpoint = normalizeStorageEndpoint(input.Endpoint, input.Bucket)
 	id := input.ID
 	if id == "" {
 		id = fmt.Sprintf("%s-%s", strings.ToLower(input.Provider), stableID(input.Name+input.Bucket))
@@ -2413,6 +2482,7 @@ func (s *Service) DeleteStorageDestination(ctx context.Context, id string) error
 func (s *Service) TestStorageDestination(ctx context.Context, input StorageDestinationInput) (StorageTestResult, error) {
 	start := time.Now()
 
+	input.Endpoint = normalizeStorageEndpoint(input.Endpoint, input.Bucket)
 	if strings.TrimSpace(input.Endpoint) == "" && input.Provider != "filesystem" {
 		return StorageTestResult{
 			Status:       "error",
@@ -2747,7 +2817,3 @@ func (s *Service) GenerateNewMasterKey() (MasterKeySecret, error) {
 	}
 	return s.RevealMasterKey()
 }
-
-
-
-

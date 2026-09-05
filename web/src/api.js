@@ -2,6 +2,13 @@ export const API = (() => {
   const jsonHeaders = { 'content-type': 'application/json' };
   async function request(path, options = {}) {
     const response = await fetch(path, { headers: jsonHeaders, credentials: 'same-origin', ...options });
+    if (response.status === 401) {
+      // Fire a global event so the app shell can show the login page.
+      window.dispatchEvent(new CustomEvent('dbvault:unauthenticated'));
+      const error = new Error('authentication required');
+      error.status = 401;
+      throw error;
+    }
     const contentType = response.headers.get('content-type') || '';
     const body = contentType.includes('application/json') ? await response.json() : await response.text();
     if (!response.ok) {
@@ -26,6 +33,9 @@ export const API = (() => {
     saveSetupStep: (step, draft = {}) => request(`/api/v1/setup/steps/${encodeURIComponent(step)}`, { method: 'POST', body: JSON.stringify(draft) }),
     finishSetup: () => request('/api/v1/setup/finish', { method: 'POST', body: '{}' }),
     setSetupStep: (step) => request('/api/v1/setup/current-step', { method: 'POST', body: JSON.stringify({ step }) }),
+    // Auth & Session
+    session: () => request('/api/v1/auth/session'),
+    logout: () => request('/api/v1/auth/logout', { method: 'POST', body: '{}' }),
     // Master Key & Disaster Recovery Custody
     masterKeyStatus: () => request('/api/v1/keys/master'),
     masterKeyReveal: () => request('/api/v1/keys/master/reveal', { method: 'POST', body: '{}' }),

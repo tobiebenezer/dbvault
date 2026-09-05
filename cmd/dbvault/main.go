@@ -894,6 +894,7 @@ func serverCmd(args []string) {
 
 	stopJobs := startJobRuntime(ctx, cfg, *dataDir, !*demo, metrics, appliance.ProductService())
 	defer stopJobs()
+	appliance.ProductService().StartSchedulerTicker(ctx)
 
 	if appDbURL != "" {
 		fmt.Println("DBVault App System Database (env):", appDbURL)

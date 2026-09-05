@@ -25,3 +25,18 @@ type NamedRecoveryPoint struct {
 	CreatedAt time.Time       `json:"created_at"`
 	CreatedBy string          `json:"created_by"`
 }
+
+type NamedRestorePoint struct {
+	Name      string    `json:"name"`
+	LSN       string    `json:"lsn,omitempty"`
+	Timeline  uint32    `json:"timeline,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type TimelineGapEvent struct {
+	SourceID    SourceID  `json:"source_id"`
+	ExpectedLSN string    `json:"expected_lsn"`
+	ReceivedLSN string    `json:"received_lsn"`
+	DetectedAt  time.Time `json:"detected_at"`
+	Severity    string    `json:"severity"`
+}

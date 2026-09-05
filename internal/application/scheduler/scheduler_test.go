@@ -3,11 +3,13 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	sqlitejobqueue "github.com/dbvault/dbvault/internal/adapters/jobqueue/sqlite"
 	"github.com/dbvault/dbvault/internal/config"
 	"github.com/dbvault/dbvault/internal/domain"
 )
@@ -304,5 +306,30 @@ func TestSchedulerEnqueuesWarehouseSyncOnTick(t *testing.T) {
 	}
 	if q.enqDup != 0 {
 		t.Fatalf("duplicate enqueues=%d", q.enqDup)
+	}
+}
+
+// Regression: production wiring (main.startJobRuntime) constructs the
+// scheduler without Now or Logger and calls Run, which reads s.opts.Now()
+// directly. The defaults must be stored back into opts or the appliance
+// panics with a nil function dereference on startup.
+func TestSchedulerRunWithoutNowDoesNotPanic(t *testing.T) {
+	q, err := sqlitejobqueue.Open(filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = q.Close() })
+	s := New(Options{Queue: q, Specs: []Spec{{ID: "prod-shape", SourceID: "src", Operation: "warehouse_sync", EverySeconds: 3600}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return on a cancelled context")
 	}
 }

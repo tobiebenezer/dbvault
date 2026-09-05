@@ -27,9 +27,9 @@ export function safeText(value, fallback = 'Not available') {
 }
 
 export function formatRelative(value) {
-  if (!value) return 'Not available';
+  if (!value) return 'Never';
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
+  if (Number.isNaN(date.getTime()) || date.getFullYear() <= 1970) return 'Never';
   const seconds = Math.round((date.getTime() - Date.now()) / 1000);
   const ranges = [[60, 'second'], [60, 'minute'], [24, 'hour'], [7, 'day'], [4.345, 'week'], [12, 'month'], [Infinity, 'year']];
   let amount = seconds;
@@ -38,4 +38,13 @@ export function formatRelative(value) {
     amount /= limit;
   }
   return formatDate(value);
+}
+
+export function databaseHasBackup(db) {
+  if (!db) return false;
+  if (typeof db.has_backup === 'boolean') return db.has_backup;
+  if (db.backup_count && db.backup_count > 0) return true;
+  if (!db.last_backup_at) return false;
+  const date = new Date(db.last_backup_at);
+  return !Number.isNaN(date.getTime()) && date.getFullYear() > 2000;
 }

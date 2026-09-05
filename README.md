@@ -28,6 +28,79 @@ Clear protection status
 
 The product goal is not merely to create backups. The goal is to prove recovery.
 
+## Automated VPS Installation (Port 2633)
+
+DBVault is built to run natively as a hardened `systemd` background service on any standard Linux VPS (Ubuntu, Debian, CentOS, AlmaLinux, Rocky). By default, it listens on port **2633**.
+
+### Option A: One-Liner Web Installer (Fastest)
+
+Run this single command on your VPS to automatically download, install, and start DBVault:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+```
+
+*To specify a custom port (e.g. 2633 is default, or another custom port):*
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo DBVAULT_PORT=2633 bash
+```
+
+### Option B: Pre-built Release Package (Manual or Air-Gapped)
+
+1. **Download the latest release tarball**:
+   ```bash
+   curl -fsSLO https://github.com/tobiebenezer/dbvault/releases/latest/download/dbvault-vps-installer.tar.gz
+   ```
+   *(Or build your own bundle locally with `make package-vps` and upload to your VPS)*
+
+2. **Extract and run automated installer**:
+   ```bash
+   mkdir -p dbvault-installer && tar -xzf dbvault-vps-installer.tar.gz -C dbvault-installer
+   cd dbvault-installer
+   sudo ./install.sh
+   ```
+
+### Option C: If You Cloned the Repo on the VPS
+
+```bash
+make install-vps
+```
+
+---
+
+### What the Automated Installer Confirms for You
+
+When you run `install.sh`, it walks through an automated pre-flight checklist:
+- **Root & Architecture**: Verifies root/sudo permissions and detects 64-bit Linux (`amd64` / `arm64`).
+- **Core Utilities**: Confirms `curl`, `gzip`, and `tar` are installed (auto-installs them if missing).
+- **Database Dump Clients**: Checks for `mysqldump`, `pg_dump`, and `sqlite3`, offering one-click installation for missing tools.
+- **Port Availability**: Confirms port **2633** is free and ready.
+- **Daemon Setup**: Writes and enables `/etc/systemd/system/dbvault.service` with auto-restart on boot and crash recovery.
+- **Readiness Probe**: Polls `http://127.0.0.1:2633/health` until DBVault returns `200 OK`.
+- **Firewall Rules**: Automatically detects and opens port `2633` in `ufw` or `firewalld`.
+- **Setup Token & Access URL**: Prints your Web Console link and one-time Setup Token right in your terminal.
+
+---
+
+## Security: Setup Token vs. Master Encryption Key
+
+DBVault uses a two-tier security model to protect your server and your database backups:
+
+### 1. The Setup Token (Appliance Ownership)
+* **What it does**: When you launch DBVault on a public VPS, anyone scanning your IP could attempt to open port 2633. The Setup Token is a one-time secret printed to your SSH terminal during installation. It guarantees that **only you** (the person with SSH access to the machine) can claim ownership and create the administrator account.
+* **How to find it**: Printed at the end of `./install.sh`, or retrieved anytime with:
+  ```bash
+  sudo journalctl -u dbvault --no-pager | grep "setup token:"
+  ```
+* **Lifespan**: Used once on the first-run web screen, then immediately invalidated.
+
+### 2. The Master Encryption Key (Data Protection)
+* **What it does**: DBVault operates on zero-knowledge encryption. Every snapshot is compressed with gzip and encrypted with **AEAD AES-256-GCM** using this key before being written to disk or uploaded to Cloudflare R2. Even if your cloud storage bucket is compromised, no one can read your raw data without this key.
+* **How to retrieve and back it up**:
+  - **In the Web Console**: Go to **Settings** → **Master Key & DR Kit** → **View & Backup Master Key**. Download the Emergency Disaster Recovery sheet for your password manager (1Password / Bitwarden).
+  - **On the VPS Disk**: Stored with strict `0600` permissions at `/var/lib/dbvault/master.key`.
+* **Lifespan**: Permanent. Save a copy in your password manager!
+
 ---
 
 ## Fast demo
@@ -103,10 +176,11 @@ Inspect:
 
 | Path | Status | Use for |
 |---|---:|---|
+| `scripts/install-vps.sh` (port 2633) | Ready | Production VPS daemon (Ubuntu, Debian, CentOS, AlmaLinux) |
+| `make package-vps` | Ready | 3.3MB self-contained offline installer archive |
 | `dbvault server --demo` | Works | Product demo and UI exploration |
 | `dbvault install --root ...` | Works | Safe install-layout testing |
 | Docker Compose demo | Works when Docker is available | Contributors and demos |
-| Native systemd install | Scaffolded | Early controlled pilots after review |
 | Kubernetes | Scaffolded | Future platform work |
 
 ---
@@ -132,6 +206,7 @@ Implemented foundations include:
 - Alerts scaffold
 - Sandbox restore lifecycle scaffold
 - Support and recovery bundle scaffolds
+- Warehouse & analytics: evidence-backed Parquet lakehouse sync (full + watermark incremental), governed query/export and scoped BI feed
 - Docker demo packaging
 - Alpha runbook and smoke tests
 
@@ -160,6 +235,8 @@ The following must be completed before DBVault can protect real customer data as
 ## Useful commands
 
 ```bash
+make package-vps      # Build standalone 3.3MB Linux VPS installer bundle
+make install-vps      # Build and run automated installer on current machine
 make web-test
 make web-build
 make test-restricted
@@ -190,6 +267,7 @@ Start here:
 - `docs/phase8/self-contained-appliance.md`
 - `docs/product/outstanding-product-experience.md`
 - `docs/configuration/connection-wiring.md`
+- `docs/warehouse.md`
 
 ---
 

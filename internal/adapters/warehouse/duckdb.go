@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -135,9 +134,9 @@ func (e *DuckDBEngine) executeViaDuckDBCLI(ctx context.Context, query string) (*
 		return nil, fmt.Errorf("duckdb error: %v (stderr: %s)", err, stderr.String())
 	}
 
-	var rawRows []map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &rawRows); err != nil {
-		return nil, err
+	keys, rawRows, err := parseJSONObjectsInOrder(stdout.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("duckdb: %w", err)
 	}
 
 	if len(rawRows) == 0 {
@@ -149,17 +148,20 @@ func (e *DuckDBEngine) executeViaDuckDBCLI(ctx context.Context, query string) (*
 		}, nil
 	}
 
-	var cols []ColumnMeta
+	// Column order must match the SELECT list order exactly: the keys are
+	// taken in the order they appear in the JSON output, never from map
+	// iteration which is randomized per run.
+	cols := make([]ColumnMeta, len(keys))
 	first := rawRows[0]
-	for k := range first {
-		cols = append(cols, ColumnMeta{Name: k, Type: inferType(first[k])})
+	for i, k := range keys {
+		cols[i] = ColumnMeta{Name: k, Type: inferType(rawToAny(first[k]))}
 	}
 
 	var rows [][]any
-	for _, raw := range rawRows {
+	for _, obj := range rawRows {
 		row := make([]any, len(cols))
 		for i, c := range cols {
-			row[i] = raw[c.Name]
+			row[i] = rawToAny(obj[c.Name])
 		}
 		rows = append(rows, row)
 	}
@@ -198,8 +200,8 @@ func (e *DuckDBEngine) executeViaSQLiteCLI(ctx context.Context, query string) (*
 		}, nil
 	}
 
-	var rawRows []map[string]any
-	if err := json.Unmarshal(outBytes, &rawRows); err != nil {
+	keys, rawRows, err := parseJSONObjectsInOrder(outBytes)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse JSON query output: %w", err)
 	}
 
@@ -212,24 +214,19 @@ func (e *DuckDBEngine) executeViaSQLiteCLI(ctx context.Context, query string) (*
 		}, nil
 	}
 
-	// Preserve key order as appearing in JSON
-	type keyExtractor struct {
-		keys []string
-	}
-	var cols []ColumnMeta
+	// Preserve SELECT-list order via the ordered JSON parse; sorting keys
+	// alphabetically would silently scramble column order for callers.
+	cols := make([]ColumnMeta, len(keys))
 	first := rawRows[0]
-	for k := range first {
-		cols = append(cols, ColumnMeta{Name: k, Type: inferType(first[k])})
+	for i, k := range keys {
+		cols[i] = ColumnMeta{Name: k, Type: inferType(rawToAny(first[k]))}
 	}
-	sort.Slice(cols, func(i, j int) bool {
-		return cols[i].Name < cols[j].Name
-	})
 
 	var rows [][]any
-	for _, raw := range rawRows {
+	for _, obj := range rawRows {
 		row := make([]any, len(cols))
 		for i, c := range cols {
-			row[i] = raw[c.Name]
+			row[i] = rawToAny(obj[c.Name])
 		}
 		rows = append(rows, row)
 	}
@@ -310,6 +307,89 @@ func (e *DuckDBEngine) SeedDataset(tableName string, columns []ColumnMeta, rows 
 	}
 
 	return nil
+}
+
+// parseJSONObjectsInOrder parses a JSON array of objects (the -json output
+// shape of the duckdb and sqlite3 CLIs) while preserving each object's key
+// order of appearance. Decoding into map[string]any would lose that order:
+// Go map iteration is randomized, which scrambled result column order across
+// runs. The returned keys come from the first object.
+func parseJSONObjectsInOrder(out []byte) ([]string, []map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, nil, fmt.Errorf("expected JSON array: %w", err)
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '[' {
+		return nil, nil, fmt.Errorf("expected JSON array, got %v", tok)
+	}
+
+	var keys []string
+	var objs []map[string]json.RawMessage
+	for dec.More() {
+		obj := make(map[string]json.RawMessage)
+		order, err := decodeJSONObjectInOrder(dec, obj)
+		if err != nil {
+			return nil, nil, err
+		}
+		if keys == nil {
+			keys = order
+		}
+		objs = append(objs, obj)
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, nil, fmt.Errorf("expected end of JSON array: %w", err)
+	}
+	return keys, objs, nil
+}
+
+// decodeJSONObjectInOrder decodes one JSON object into obj while recording
+// the key order of first appearance.
+func decodeJSONObjectInOrder(dec *json.Decoder, obj map[string]json.RawMessage) ([]string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, fmt.Errorf("expected JSON object, got %v", tok)
+	}
+	var order []string
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected JSON object key, got %v", keyTok)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, err
+		}
+		if _, seen := obj[key]; !seen {
+			order = append(order, key)
+		}
+		obj[key] = raw
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+// rawToAny decodes one raw JSON value into the dynamic any representation
+// used throughout query results. Empty raw (missing key) decodes to nil so
+// absent columns behave exactly as NULL did under the map-based parser.
+func rawToAny(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	return v
 }
 
 func inferType(val any) string {

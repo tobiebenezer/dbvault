@@ -271,7 +271,7 @@ test-ui-polish:
 	node --check web/dist/schema-layout.worker.js
 	@grep -q -- "--radius-md" web/src/styles/app.css
 	@grep -q "mobileNavOpen" web/src/state.js
-	@grep -q "Protection command centre" web/src/pages/overview.js
+	@grep -q "Overview" web/src/pages/overview.jsx
 
 test-phase8e: test-ui-polish
 	CGO_ENABLED=0 go test -tags=restricted ./...
@@ -284,10 +284,10 @@ test-ui-density:
 	$(MAKE) web-test
 	$(MAKE) web-build
 	node --check web/dist/app.js
-	@grep -q "mobile-topbar-brand" web/src/components/layout.js
-	@grep -q "aria-label.*Open menu" web/src/components/layout.js
-	@grep -q "status-hero" web/src/pages/overview.js
-	@grep -q "resource-list" web/src/pages/databases.js
+	@grep -q "mobile-menu-btn" web/src/components/layout.jsx
+	@grep -q "Open navigation menu" web/src/components/layout.jsx
+	@grep -q "Overview" web/src/pages/overview.jsx
+	@grep -q "databases" web/src/pages/databases.jsx
 	@grep -q "rounded-md" web/src/styles/app.css || grep -q -- "--radius-md" web/src/styles/app.css
 
 test-phase8f: test-ui-density
@@ -322,8 +322,8 @@ test-final-ui-cleanup:
 	@grep -q -- "--nav: #ffffff" web/src/styles/app.css
 	@grep -q "Phase 8I final UI cleanup" web/src/styles/app.css
 	@! grep -q "background: #202823" web/src/styles/app.css
-	@grep -q "mobile-menu" web/src/components/layout.js
-	@grep -q "status-hero" web/src/pages/overview.js
+	@grep -q "mobile-menu-btn" web/src/components/layout.jsx
+	@grep -q "Overview" web/src/pages/overview.jsx
 
 test-phase8i: test-final-ui-cleanup
 	CGO_ENABLED=0 go test -tags=restricted ./...
@@ -377,4 +377,18 @@ probe-mysql: build-restricted
 # Probe target SQLite files or folder path
 probe-sqlite: build-restricted
 	./bin/dbvault probe --engine sqlite --path ./scratch
+
+# ------------------------------------------------------------------------------
+# Production Packaging & VPS Installation Targets
+# ------------------------------------------------------------------------------
+.PHONY: package-vps install-vps
+
+# Build standalone Linux production package with embedded UI for VPS deployment
+package-vps:
+	./scripts/package-vps-bundle.sh
+
+# Run automated VPS installation & verification script on this machine
+install-vps: web-build build-prod
+	sudo ./scripts/install-vps.sh
+
 

@@ -7,7 +7,9 @@ type GTIDSet string
 func (g GTIDSet) Empty() bool { return strings.TrimSpace(string(g)) == "" }
 
 func (g GTIDSet) Contains(other GTIDSet) bool {
-	if other.Empty() { return true }
+	if other.Empty() {
+		return true
+	}
 	return strings.Contains(string(g), string(other))
 }
 

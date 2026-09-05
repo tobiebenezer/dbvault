@@ -2,7 +2,7 @@ import { useState, useEffect } from 'preact/hooks';
 import { API } from '../api.js';
 import { Card, Button, Badge, PageHeader, MetricCard, DataTable, StatusIndicator, EmptyState, LoadingState, ErrorBox, Icon } from '../components/ui.jsx';
 import { StorageTopologyMap } from '../components/topology.jsx';
-import { formatDate, formatRelative, titleCase } from '../format.js';
+import { formatDate, formatRelative, titleCase, databaseHasBackup } from '../format.js';
 import { Store } from '../state.js';
 import { ProductActions } from '../actions.js';
 
@@ -291,7 +291,13 @@ export function OverviewPage() {
                       />
                       <Button
                         label="Restore"
-                        onClick={() => Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`)}
+                        onClick={() => {
+                          if (databaseHasBackup(db)) {
+                            Store.navigate(`/recovery?source=${encodeURIComponent(db.id)}`);
+                          }
+                        }}
+                        disabled={!databaseHasBackup(db)}
+                        title={!databaseHasBackup(db) ? "No backup available for this database. Run a backup first." : "Point-In-Time Recovery & Restore"}
                         tone="ghost compact"
                       />
                     </div>

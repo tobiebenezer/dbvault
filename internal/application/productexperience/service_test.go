@@ -322,4 +322,3 @@ func TestRestoreApprovalRequestIsRecorded(t *testing.T) {
 		t.Fatalf("approval was not retained: %#v", got)
 	}
 }
-

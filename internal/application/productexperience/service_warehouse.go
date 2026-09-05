@@ -360,7 +360,7 @@ func (s *Service) syncWarehouseTable(ctx context.Context, duckdbPath, databaseID
 		return err
 	}
 	query := buildWarehouseExtractQuery(tableName, mode, watermarkColumn, lastWatermark)
-	result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: databaseID, Query: query, ConnectorID: opts.ConnectorID})
+	result, err := s.executeLiveDBQuery(ctx, warehouse.QueryRequest{Database: databaseID, Query: query, ConnectorID: opts.ConnectorID, TableHint: tableName})
 	if err != nil {
 		return fmt.Errorf("extract %s.%s: %w", databaseID, tableName, err)
 	}
@@ -537,7 +537,11 @@ var inspectParquet = func(duckdbPath, path string) ([]domain.WarehouseColumn, in
 		return nil, 0, fmt.Errorf("duckdb runtime unavailable")
 	}
 	quoted := strings.ReplaceAll(path, "'", "''")
-	desc := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("DESCRIBE SELECT * FROM read_parquet('%s')", quoted))
+	// hive_partitioning=false: read_parquet auto-derives partition columns
+	// from db=/tbl= style directory names, which would append phantom
+	// columns to DESCRIBE and break schema comparison against the source.
+	readFrom := fmt.Sprintf("read_parquet('%s', hive_partitioning=false)", quoted)
+	desc := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("DESCRIBE SELECT * FROM %s", readFrom))
 	out, err := desc.Output()
 	if err != nil {
 		return nil, 0, fmt.Errorf("describe parquet: %w", err)
@@ -546,7 +550,7 @@ var inspectParquet = func(duckdbPath, path string) ([]domain.WarehouseColumn, in
 	if err != nil {
 		return nil, 0, err
 	}
-	cnt := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("SELECT count(*) FROM read_parquet('%s')", quoted))
+	cnt := exec.Command(duckdbPath, "-csv", "-noheader", "-c", fmt.Sprintf("SELECT count(*) FROM %s", readFrom))
 	cout, err := cnt.Output()
 	if err != nil {
 		return nil, 0, fmt.Errorf("count parquet rows: %w", err)
@@ -1574,6 +1578,26 @@ func (s *Service) executeLiveDBQuery(ctx context.Context, req warehouse.QueryReq
 			return nil, fmt.Errorf("mysql query error: %w", err)
 		}
 		rows, cols = parseMySQLBatchOutput(out)
+		if req.TableHint != "" {
+			// MySQL --batch output carries no column types; fetch the real
+			// ones so watermark classification (date/datetime/int) works.
+			showArgs := []string{
+				"-h", mHost,
+				"-P", strconv.Itoa(mPort),
+				"-u", mUser,
+				"--batch",
+				"--connect-timeout=5",
+				"-D", dbName,
+				"-e", "SHOW COLUMNS FROM " + req.TableHint,
+			}
+			showCmd := exec.CommandContext(ctx, "mysql", showArgs...)
+			if mPass != "" {
+				showCmd.Env = append(os.Environ(), "MYSQL_PWD="+mPass)
+			}
+			if showOut, err := showCmd.Output(); err == nil {
+				enrichColumnTypesFromFieldList(cols, showOut)
+			}
+		}
 	} else {
 		pgHost, pgPort, pgUser, pgPass := s.resolvePostgresParams()
 		if conn != nil {
@@ -1605,6 +1629,30 @@ func (s *Service) executeLiveDBQuery(ctx context.Context, req warehouse.QueryReq
 		Engine:      engine + " (live)",
 		ExecutedAt:  time.Now().UTC(),
 	}, nil
+}
+
+// enrichColumnTypesFromFieldList merges real column types from a
+// tab-separated SHOW COLUMNS / field-list output (header row: Field, Type,
+// ...) into cols, matching by case-insensitive field name. Best-effort: the
+// query result keeps its previous types for any column not found.
+func enrichColumnTypesFromFieldList(cols []warehouse.ColumnMeta, out []byte) {
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return
+	}
+	types := map[string]string{}
+	for _, line := range lines[1:] {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		types[strings.ToLower(strings.TrimSpace(fields[0]))] = strings.TrimSpace(fields[1])
+	}
+	for i := range cols {
+		if t, ok := types[strings.ToLower(cols[i].Name)]; ok && t != "" {
+			cols[i].Type = t
+		}
+	}
 }
 
 // parseMySQLBatchOutput parses tab-separated MySQL --batch output into columns and rows.
@@ -1960,10 +2008,10 @@ func (s *Service) ExportWarehouseResults(ctx context.Context, req warehouse.Quer
 	}
 
 	meta := map[string]string{
-		"format":       strings.ToLower(format),
-		"rows":         strconv.Itoa(exportedRows),
-		"duration_ms":  strconv.FormatInt(time.Since(start).Milliseconds(), 10),
-		"masked":       "false",
+		"format":      strings.ToLower(format),
+		"rows":        strconv.Itoa(exportedRows),
+		"duration_ms": strconv.FormatInt(time.Since(start).Milliseconds(), 10),
+		"masked":      "false",
 	}
 	if len(maskedCols) > 0 {
 		meta["masked"] = "true"

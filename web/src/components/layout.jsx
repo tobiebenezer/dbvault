@@ -32,6 +32,7 @@ const navGroups = [
 export function Layout({ children }) {
   const [state, setState] = useState(Store.state);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
     const handleGlobalKeys = (e) => {
@@ -50,6 +51,7 @@ export function Layout({ children }) {
       }
       if (e.key === 'Escape') {
         setShowShortcuts(false);
+        setShowAbout(false);
         Store.set({ commandOpen: false, workspaceOpen: false });
       }
     };
@@ -72,20 +74,28 @@ export function Layout({ children }) {
         aria-label="Close menu"
         onClick={() => Store.set({ mobileNavOpen: false })}
       />
-      <Sidebar state={state} onOpenShortcuts={() => setShowShortcuts(true)} />
+      <Sidebar
+        state={state}
+        onOpenShortcuts={() => setShowShortcuts(true)}
+        onOpenAbout={() => setShowAbout(true)}
+      />
       <main className="main" id="main">
         <Topbar state={state} onOpenShortcuts={() => setShowShortcuts(true)} />
         <div className="page-wrap">{children}</div>
       </main>
       <Toast state={state} />
-      <CommandPalette open={Boolean(state.commandOpen)} />
+      <CommandPalette
+        open={Boolean(state.commandOpen)}
+        onOpenAbout={() => setShowAbout(true)}
+      />
       {showShortcuts && <ShortcutsModal onClose={() => setShowShortcuts(false)} />}
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
       {state.confirmModal && <ConfirmationModal config={state.confirmModal} />}
     </div>
   );
 }
 
-function Sidebar({ state, onOpenShortcuts }) {
+function Sidebar({ state, onOpenShortcuts, onOpenAbout }) {
   const currentRoute = state.route;
   const workspaceOpen = Boolean(state.workspaceOpen);
   const alertBadge = state.alerts?.badge;
@@ -103,7 +113,7 @@ function Sidebar({ state, onOpenShortcuts }) {
     <aside className="sidebar" aria-label="Primary navigation">
       <div className="sidebar-head">
         <a className="brand" href="/" onClick={navClick('/')}>
-          <span className="brand-mark">DB</span>
+          <img src="/logo.png" alt="DBVault" className="brand-logo-img" style={{ width: '32px', height: '32px', borderRadius: '8px', objectFit: 'cover', flexShrink: 0, boxShadow: '0 2px 8px rgba(16, 185, 129, 0.25)' }} />
           <div className="brand-copy">
             <span className="brand-title">DBVault</span>
             <span className="brand-sub">Enterprise Backup Engine</span>
@@ -117,22 +127,25 @@ function Sidebar({ state, onOpenShortcuts }) {
         />
       </div>
 
-      <div className="workspace-switcher">
+      <div className="workspace-picker">
         <button
-          className="project-card"
-          type="button"
-          aria-expanded={workspaceOpen ? 'true' : 'false'}
+          className="workspace-current"
           onClick={() => Store.set({ workspaceOpen: !workspaceOpen })}
+          type="button"
+          aria-expanded={workspaceOpen}
         >
-          <div className="project-card-info">
-            <strong>Default Project</strong>
-            <small>Active Vault Appliance</small>
+          <div className="workspace-icon">
+            <Icon name="shield" size={16} />
           </div>
-          <Icon name="chevron" size={12} />
+          <div className="workspace-meta">
+            <span className="workspace-name">DBVault Engine</span>
+            <span className="workspace-tier">Enterprise Appliance</span>
+          </div>
+          <Icon name="chevron" size={14} className="workspace-chevron" />
         </button>
 
         {workspaceOpen && (
-          <div className="workspace-menu">
+          <div className="workspace-dropdown">
             <button
               type="button"
               className="workspace-option active"
@@ -181,11 +194,42 @@ function Sidebar({ state, onOpenShortcuts }) {
       </nav>
 
       <div className="sidebar-footer">
+        <button
+          type="button"
+          className="footer-shortcut-btn"
+          onClick={async () => {
+            try {
+              await API.logout();
+            } catch (_) {}
+            window.dispatchEvent(new CustomEvent('dbvault:unauthenticated'));
+          }}
+          title="Sign out of DBVault"
+        >
+          <span>Sign Out</span>
+          <Icon name="close" size={12} />
+        </button>
+        <button
+          type="button"
+          className="footer-shortcut-btn"
+          onClick={onOpenAbout}
+          title="About DBVault"
+        >
+          <span>About</span>
+          <Icon name="info" size={12} />
+        </button>
         <button type="button" className="footer-shortcut-btn" onClick={onOpenShortcuts}>
           <span>Shortcuts</span>
           <kbd>?</kbd>
         </button>
-        <span className="version-tag">v0.1-alpha · Production Ready</span>
+        <button
+          type="button"
+          className="version-tag"
+          onClick={onOpenAbout}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: '2px 0' }}
+          title="About DBVault Appliance"
+        >
+          v0.1-alpha · Production Ready
+        </button>
       </div>
     </aside>
   );
@@ -263,20 +307,18 @@ function Toast({ state }) {
   );
 }
 
-export function CommandPalette({ open }) {
+export function CommandPalette({ open, onOpenAbout }) {
   const [query, setQuery] = useState('');
 
   const commands = [
-    { label: 'Back up primary database', description: 'Start full production snapshot & WAL sync', run: () => ProductActions.backup() },
-    { label: 'Run restore drill', description: 'Verify recovery in isolated sandbox container', run: () => ProductActions.restoreDrill() },
-    { label: 'Open Recovery Studio & PITR', description: 'Point-in-time recovery & time-travel planner', run: () => Store.navigate('/recovery') },
-    { label: 'Open Data Warehouse & Analytics', description: 'Run analytical OLAP queries over Parquet lakehouse', run: () => Store.navigate('/warehouse') },
-    { label: 'Explore Databases & Tables', description: 'Live schema inspector, table sizes & exclusions', run: () => Store.navigate('/databases') },
-    { label: 'Connect & Probe Database', description: 'Discover databases on PostgreSQL or MySQL servers', run: () => Store.navigate('/databases') },
-    { label: 'Manage Storage Targets & WORM', description: 'Connect Cloudflare R2, AWS S3, or MinIO', run: () => Store.navigate('/repositories') },
-    { label: 'Security & Compliance Center', description: 'ISO 27001, ISO 27040 & SOC2 audit certificates', run: () => Store.navigate('/trust') },
-    { label: 'Run preflight system doctor', description: 'Check readiness, storage, and host diagnostics', run: () => ProductActions.doctor() },
-    { label: 'Create emergency recovery bundle', description: 'Export zero-knowledge disaster recovery bundle', run: async () => {
+    { label: 'Back Up Primary Database', description: 'Run immediate snapshot & WAL checkpoint', run: () => ProductActions.backup() },
+    { label: 'Restore Database (Recovery Studio)', description: 'Point-in-Time Recovery & restore tools', run: () => Store.navigate('/recovery') },
+    { label: 'Run Automated Restore Drill', description: 'Validate cryptographic checksums & table consistency', run: () => ProductActions.restoreDrill() },
+    { label: 'Add & Discover Databases', description: 'Connect PostgreSQL, MySQL, MariaDB, or SQLite', run: () => Store.navigate('/databases') },
+    { label: 'Configure Cloud Storage & WORM', description: 'Connect Cloudflare R2, AWS S3, MinIO, or Contabo', run: () => Store.navigate('/repositories') },
+    { label: 'Query Data Lakehouse & Parquet', description: 'SQL analytics on historical database snapshots', run: () => Store.navigate('/warehouse') },
+    { label: 'Run Appliance System Doctor', description: 'Self-diagnose storage, engine, and network health', run: () => ProductActions.doctor() },
+    { label: 'Create Disaster Recovery Kit', description: 'Export Master Key sheet and offline restore bundle', run: async () => {
       try {
         const res = await API.recoveryBundle();
         Store.toast(`Recovery bundle created: ${res.path}`, 'success');
@@ -286,7 +328,8 @@ export function CommandPalette({ open }) {
     }},
     { label: 'View all operations & jobs', description: 'Monitor running tasks and logs', run: () => Store.navigate('/jobs') },
     { label: 'Check alerts & incident notifications', description: 'Inspect active warnings and health checks', run: () => Store.navigate('/alerts') },
-    { label: 'Configure Notification Webhooks', description: 'Slack, Discord, and Teams alerting', run: () => Store.navigate('/settings') }
+    { label: 'Configure Notification Webhooks', description: 'Slack, Discord, and Teams alerting', run: () => Store.navigate('/settings') },
+    { label: 'About DBVault Appliance', description: 'Appliance version, encryption specs, and system information', run: () => { if (onOpenAbout) onOpenAbout(); } }
   ];
 
   const matches = commands.filter(({ label, description }) =>
@@ -385,6 +428,67 @@ function ShortcutsModal({ onClose }) {
 
         <div className="row-actions mt-md">
           <Button label="Close" onClick={onClose} tone="ghost" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AboutModal({ onClose }) {
+  return (
+    <div
+      className="command-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="About DBVault"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="command-panel" style={{ maxWidth: '520px', padding: '28px' }}>
+        <div className="row-between mb-md">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <img src="/logo.png" alt="DBVault" style={{ width: '36px', height: '36px', borderRadius: '8px', objectFit: 'cover', flexShrink: 0, boxShadow: '0 2px 8px rgba(16, 185, 129, 0.25)' }} />
+            <h2 style={{ margin: 0, fontSize: '18px' }}>DBVault Appliance</h2>
+          </div>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close dialog">
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+
+        <p className="text-sm text-muted" style={{ lineHeight: 1.6, margin: '0 0 16px 0' }}>
+          DBVault is a self-contained Go appliance for database backup automation, cryptographic Merkle verification, and point-in-time recovery on VPS servers and self-hosted infrastructure.
+        </p>
+
+        <div className="stack-sm mb-md" style={{
+          background: 'var(--panel-inset, #f9fafb)',
+          padding: '16px',
+          borderRadius: '8px',
+          border: '1px solid var(--line-subtle, #e5e7eb)',
+          gap: '10px'
+        }}>
+          <div className="row-between text-xs">
+            <span className="text-muted">Version:</span>
+            <strong className="cell-mono">v0.1-alpha (Production Ready)</strong>
+          </div>
+          <div className="row-between text-xs">
+            <span className="text-muted">Engines Supported:</span>
+            <span>PostgreSQL · MySQL · MariaDB · SQLite</span>
+          </div>
+          <div className="row-between text-xs">
+            <span className="text-muted">Envelope Encryption:</span>
+            <span>AEAD AES-256-GCM (Master Key Derivation)</span>
+          </div>
+          <div className="row-between text-xs">
+            <span className="text-muted">Integrity Signatures:</span>
+            <span>Deterministic Merkle Tree (Ed25519)</span>
+          </div>
+          <div className="row-between text-xs">
+            <span className="text-muted">Vault Storage:</span>
+            <span>Local Filesystem Repository & Cloud (R2 / S3 / WORM)</span>
+          </div>
+        </div>
+
+        <div className="row-actions">
+          <Button label="Close" onClick={onClose} tone="primary" />
         </div>
       </div>
     </div>

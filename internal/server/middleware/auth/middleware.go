@@ -89,6 +89,8 @@ func (m *Middleware) Exempt(path string) bool {
 		return true
 	case "/api/v1/auth/login", "/api/v1/auth/bootstrap", "/api/v1/auth/tokens":
 		return true // credential-presenting endpoints; rate limited instead
+	case "/api/v1/auth/bootstrap-status":
+		return true // read-only first-run probe; reveals no credential material
 	}
 	if strings.HasPrefix(path, "/api/v1/setup") {
 		return true

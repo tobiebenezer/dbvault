@@ -21,14 +21,14 @@ var (
 
 // LogChunkMetadata contains metadata for an archived transaction log segment.
 type LogChunkMetadata struct {
-	SourceID     domain.SourceID `json:"source_id"`
-	SegmentName  string          `json:"segment_name"`
-	StartLSN     string          `json:"start_lsn,omitempty"`
-	EndLSN       string          `json:"end_lsn,omitempty"`
-	ByteSize     int64           `json:"byte_size"`
-	SHA256Hash   string          `json:"sha256_hash"`
-	Encrypted    bool            `json:"encrypted"`
-	ArchivedAt   time.Time       `json:"archived_at"`
+	SourceID    domain.SourceID `json:"source_id"`
+	SegmentName string          `json:"segment_name"`
+	StartLSN    string          `json:"start_lsn,omitempty"`
+	EndLSN      string          `json:"end_lsn,omitempty"`
+	ByteSize    int64           `json:"byte_size"`
+	SHA256Hash  string          `json:"sha256_hash"`
+	Encrypted   bool            `json:"encrypted"`
+	ArchivedAt  time.Time       `json:"archived_at"`
 }
 
 // Service manages continuous transaction log (WAL / binlog) ingestion and buffering.

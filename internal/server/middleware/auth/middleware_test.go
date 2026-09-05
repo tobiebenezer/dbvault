@@ -52,8 +52,32 @@ func TestBootstrapLoginAndAccess(t *testing.T) {
 	m, mux := newTestStack(t)
 	h := m.Protect(mux)
 
+	// Before bootstrap the public status probe reports the appliance is unset.
+	res := do(t, h, "GET", "/api/v1/auth/bootstrap-status", "", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("bootstrap-status status=%d body=%s", res.Code, res.Body.String())
+	}
+	var status struct {
+		Bootstrapped bool `json:"bootstrapped"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Bootstrapped {
+		t.Fatal("expected bootstrapped=false before admin creation")
+	}
+
 	if res := do(t, h, "POST", "/api/v1/auth/bootstrap", `{"setup_token":"tok","username":"admin@example.test","password":"correct horse battery"}`, nil); res.Code != http.StatusCreated {
 		t.Fatalf("bootstrap status=%d body=%s", res.Code, res.Body.String())
+	}
+
+	// After bootstrap the probe flips and no longer advertises first-run.
+	res = do(t, h, "GET", "/api/v1/auth/bootstrap-status", "", nil)
+	if err := json.Unmarshal(res.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Bootstrapped {
+		t.Fatal("expected bootstrapped=true after admin creation")
 	}
 
 	// Replay must fail: admin already provisioned.
@@ -66,7 +90,7 @@ func TestBootstrapLoginAndAccess(t *testing.T) {
 		t.Fatalf("bad login status=%d", res.Code)
 	}
 
-	res := do(t, h, "POST", "/api/v1/auth/login", `{"username":"admin@example.test","password":"correct horse battery"}`, nil)
+	res = do(t, h, "POST", "/api/v1/auth/login", `{"username":"admin@example.test","password":"correct horse battery"}`, nil)
 	if res.Code != http.StatusOK {
 		t.Fatalf("login status=%d body=%s", res.Code, res.Body.String())
 	}

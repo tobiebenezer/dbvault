@@ -22,24 +22,24 @@ type LogPosition struct {
 }
 
 type PhysicalBackupSet struct {
-	ID               PhysicalBackupID  `json:"id"`
-	SourceID         SourceID          `json:"source_id"`
-	RepositoryID     RepositoryID      `json:"repository_id"`
-	LineageID        LineageID         `json:"lineage_id"`
-	Engine           DatabaseEngine    `json:"engine"`
-	EngineVersion    string            `json:"engine_version"`
+	ID               PhysicalBackupID   `json:"id"`
+	SourceID         SourceID           `json:"source_id"`
+	RepositoryID     RepositoryID       `json:"repository_id"`
+	LineageID        LineageID          `json:"lineage_id"`
+	Engine           DatabaseEngine     `json:"engine"`
+	EngineVersion    string             `json:"engine_version"`
 	Type             PhysicalBackupType `json:"type"`
-	ParentBackupID   *PhysicalBackupID `json:"parent_backup_id,omitempty"`
-	StartedAt        time.Time         `json:"started_at"`
-	CompletedAt      time.Time         `json:"completed_at"`
-	StartLogPosition LogPosition       `json:"start_log_position"`
-	EndLogPosition   LogPosition       `json:"end_log_position"`
-	Timeline         string            `json:"timeline,omitempty"`
-	SystemIdentifier string            `json:"system_identifier,omitempty"`
-	Artifacts        []BackupArtifact  `json:"artifacts"`
-	ManifestDigest   string            `json:"manifest_digest"`
-	VerifiedAt       *time.Time        `json:"verified_at,omitempty"`
-	RestoreTestedAt  *time.Time        `json:"restore_tested_at,omitempty"`
+	ParentBackupID   *PhysicalBackupID  `json:"parent_backup_id,omitempty"`
+	StartedAt        time.Time          `json:"started_at"`
+	CompletedAt      time.Time          `json:"completed_at"`
+	StartLogPosition LogPosition        `json:"start_log_position"`
+	EndLogPosition   LogPosition        `json:"end_log_position"`
+	Timeline         string             `json:"timeline,omitempty"`
+	SystemIdentifier string             `json:"system_identifier,omitempty"`
+	Artifacts        []BackupArtifact   `json:"artifacts"`
+	ManifestDigest   string             `json:"manifest_digest"`
+	VerifiedAt       *time.Time         `json:"verified_at,omitempty"`
+	RestoreTestedAt  *time.Time         `json:"restore_tested_at,omitempty"`
 }
 
 func (b PhysicalBackupSet) IsIncremental() bool { return b.Type == PhysicalBackupIncremental }

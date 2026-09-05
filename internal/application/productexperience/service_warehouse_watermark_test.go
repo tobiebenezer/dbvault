@@ -117,10 +117,10 @@ func TestBuildWarehouseExtractQuery(t *testing.T) {
 
 func TestWatermarkGreater(t *testing.T) {
 	tests := []struct {
-		name    string
-		a, b    string
-		typ     string
-		want    bool
+		name string
+		a, b string
+		typ  string
+		want bool
 	}{
 		{"integer numeric not lexical 9vs10", "9", "10", "integer", false},
 		{"integer numeric 10vs9", "10", "9", "integer", true},
