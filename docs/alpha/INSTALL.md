@@ -23,6 +23,21 @@ cd dbvault-installer
 sudo ./install.sh
 ```
 
+### 3. Updating to a Newer Release
+If DBVault is already installed, updating is fully automated and safe. Your databases, Master Key, and backup schedules in `/var/lib/dbvault` remain untouched:
+
+```bash
+# Check if an update is available
+sudo dbvault-update --check
+
+# Apply update
+sudo dbvault-update
+```
+Alternatively, re-running the installation one-liner automatically performs an in-place upgrade:
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+```
+
 ---
 
 ## Demo mode

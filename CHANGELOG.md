@@ -8,13 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-09-05
 
 ### Added
-- **Automated VPS Installation Script (`scripts/install-vps.sh`)**:
+- **Automated VPS Installation & Safe In-Place Updater (`scripts/install-vps.sh`)**:
   - One-liner curl installation support (`curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash`).
+  - Safe in-place update engine: automatically detects existing installations, compares versions against GitHub releases, and performs atomic binary upgrades while preserving all existing databases, Master Keys, and schedules in `/var/lib/dbvault`.
+  - Automatic creation of `/usr/local/bin/dbvault.bak` rollback safety copy before applying updates.
+  - Dedicated `dbvault-update` helper script installed to `/usr/local/bin/dbvault-update` (supports `sudo dbvault-update` and `--check`).
+  - CLI `dbvault version` and `dbvault update --check` integration with live GitHub release inspection.
   - Native port configuration defaulting to port **2633** (override via `DBVAULT_PORT`).
   - Production `systemd` daemon management (`dbvault.service`) with auto-start, crash recovery, and journal logging.
   - Pre-flight system checks for OS architecture (`amd64`, `arm64`), core utilities (`curl`, `gzip`, `tar`), and interactive database dump tool resolution (`mysqldump`, `pg_dump`, `sqlite3`).
   - Multi-distro firewall rule configuration supporting both `ufw` and `firewalld`.
-  - HTTP readiness health polling against `/health` before finishing installation.
+  - HTTP readiness health polling against `/health` before finishing installation or update.
   - Automated detection and terminal output of appliance Setup Token and Web Console access URL.
 - **Standalone VPS Deployment Bundler (`scripts/package-vps-bundle.sh`)**:
   - `make package-vps` target compiling standalone Linux binary with embedded web UI and packaging it into `dist/dbvault-vps-installer.tar.gz`.

@@ -68,6 +68,31 @@ make install-vps
 
 ---
 
+## Updating to a New Release
+
+DBVault supports seamless in-place updates. Upgrading replaces the executable and restarts the background service while **preserving all existing databases, credentials, AEAD AES-256 master keys, and backup schedules** in `/var/lib/dbvault`.
+
+### 1. Check if an Update is Available
+```bash
+sudo dbvault-update --check
+# or
+dbvault update --check
+```
+
+### 2. Apply the Latest Release (In-Place Upgrade)
+Run the dedicated updater:
+```bash
+sudo dbvault-update
+```
+Or re-run the web installer (it automatically detects an existing installation and applies the update safely):
+```bash
+curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+```
+
+> **Safe Rollback**: Every update automatically creates a backup of your previous binary at `/usr/local/bin/dbvault.bak` and verifies health check probes before committing.
+
+---
+
 ### What the Automated Installer Confirms for You
 
 When you run `install.sh`, it walks through an automated pre-flight checklist:

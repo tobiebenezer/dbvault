@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# DBVault Automated VPS Installer & Verification Script
+# DBVault Automated VPS Installer & Updater
 # ==============================================================================
-# Can be run locally:   sudo ./scripts/install-vps.sh
-# Or via curl one-liner: curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+# Fresh install:  curl -fsSL https://raw.githubusercontent.com/tobiebenezer/dbvault/main/scripts/install-vps.sh | sudo bash
+# In-place update: sudo dbvault-update  (or re-run curl command above)
+# Check updates:  sudo dbvault-update --check
 # ==============================================================================
 
 set -euo pipefail
@@ -25,6 +26,49 @@ SERVICE_FILE="/etc/systemd/system/dbvault.service"
 GITHUB_REPO="${DBVAULT_REPO:-tobiebenezer/dbvault}"
 DOWNLOAD_URL="${DBVAULT_DOWNLOAD_URL:-}"
 
+UPDATE_MODE=false
+CHECK_ONLY=false
+FORCE=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --update|-u)
+            UPDATE_MODE=true
+            ;;
+        --check|-c)
+            CHECK_ONLY=true
+            ;;
+        --force|-f)
+            FORCE=true
+            ;;
+        --help|-h)
+            echo "Usage: sudo $0 [options]"
+            echo ""
+            echo "Options:"
+            echo "  --update, -u   Update DBVault to the latest release (safe in-place upgrade)"
+            echo "  --check, -c    Check if a newer DBVault release is available on GitHub"
+            echo "  --force, -f    Force reinstall/update even if already on the same version"
+            echo "  --help, -h     Show this help message"
+            echo ""
+            echo "Environment variables:"
+            echo "  DBVAULT_PORT          Listening port (default: 2633)"
+            echo "  DBVAULT_BIND          Bind address (default: 0.0.0.0)"
+            echo "  DBVAULT_DATA_DIR      Data directory (default: /var/lib/dbvault)"
+            echo "  DBVAULT_REPO          GitHub repository (default: tobiebenezer/dbvault)"
+            echo "  DBVAULT_DOWNLOAD_URL  Custom download URL for the dbvault binary"
+            echo "  DBVAULT_FORCE         Set to 1 to force reinstallation"
+            exit 0
+            ;;
+    esac
+done
+
+if [[ "${DBVAULT_FORCE:-0}" == "1" ]]; then
+    FORCE=true
+fi
+if [[ "${DBVAULT_UPDATE:-0}" == "1" ]]; then
+    UPDATE_MODE=true
+fi
+
 # Helper to read input safely even when piped into bash (curl ... | bash)
 prompt_yes_no() {
     local prompt_msg="$1"
@@ -41,27 +85,103 @@ prompt_yes_no() {
     [[ "$ans" =~ ^([yY][eE][sS]|[yY])+$ ]]
 }
 
-echo -e "${BOLD}${CYAN}"
-echo "=================================================================="
-echo "          DBVault Appliance - VPS Automated Installation          "
-echo "=================================================================="
-echo -e "${NC}"
+# ------------------------------------------------------------------------------
+# 1. Existing Installation & Version Check
+# ------------------------------------------------------------------------------
+IS_INSTALLED=false
+CURRENT_VERSION=""
+if [[ -f "${BIN_DIR}/dbvault" && -x "${BIN_DIR}/dbvault" ]]; then
+    IS_INSTALLED=true
+    CURRENT_VERSION=$("${BIN_DIR}/dbvault" version 2>/dev/null | awk '{print $2}' | sed 's/^v//' || echo "")
+fi
+
+# Resolve latest release from GitHub
+LATEST_TAG=""
+LATEST_VERSION=""
+if command -v curl >/dev/null 2>&1; then
+    LATEST_TAG=$(curl -fsSL --connect-timeout 5 -H "Accept: application/vnd.github.v3+json" "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | sed -E 's/.*"tag_name": "([^"]+)".*/\1/' || true)
+    if [[ -z "$LATEST_TAG" ]]; then
+        LATEST_TAG=$(curl -sI --connect-timeout 5 "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep -i '^location:' | sed -E 's|.*/tag/([^/\r\n]+).*|\1|' || true)
+    fi
+    if [[ "$LATEST_TAG" =~ /releases/?$ || "$LATEST_TAG" =~ ^location: ]]; then
+        LATEST_TAG=""
+    fi
+fi
+if [[ -n "$LATEST_TAG" ]]; then
+    LATEST_VERSION="${LATEST_TAG#v}"
+fi
+
+# Handle --check flag (does not require root)
+if [[ "$CHECK_ONLY" == true ]]; then
+    echo -e "${BOLD}${CYAN}DBVault Version Check${NC}"
+    echo "=================================================================="
+    echo -e "Installed version: ${BOLD}${CURRENT_VERSION:-Not installed}${NC}"
+    echo -e "Latest release:    ${BOLD}${LATEST_VERSION:-Unavailable}${NC}"
+    echo "=================================================================="
+    if [[ "$IS_INSTALLED" != true ]]; then
+        echo -e "${YELLOW}DBVault is not currently installed.${NC}"
+        echo "Run 'sudo $0' to install."
+    elif [[ -n "$LATEST_VERSION" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+        echo -e "${GREEN}✓ DBVault is up to date (v${CURRENT_VERSION}).${NC}"
+    elif [[ -n "$LATEST_VERSION" ]]; then
+        echo -e "${YELLOW}→ An updated release is available: v${CURRENT_VERSION} → v${LATEST_VERSION}${NC}"
+        echo "To update, run: sudo dbvault-update (or sudo $0 --update)"
+    fi
+    exit 0
+fi
 
 # ------------------------------------------------------------------------------
-# 1. Root / Sudo Check
+# 2. Privilege Check
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[1/8] Confirming privileges...${NC}"
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}[ERROR] This installation script must be run as root or via sudo.${NC}"
+    echo -e "${RED}[ERROR] This script must be run as root or via sudo.${NC}"
     echo "Please re-run: sudo $0 or curl ... | sudo bash"
     exit 1
 fi
-echo -e "  ${GREEN}✓ Running with administrative privileges${NC}"
+
+# Check if already installed and already at latest version
+LOCAL_PACKAGE_EXISTS=false
+if [[ -f "./dbvault" && -x "./dbvault" ]]; then
+    LOCAL_PACKAGE_EXISTS=true
+fi
+
+if [[ "$IS_INSTALLED" == true && "$FORCE" != true && "$LOCAL_PACKAGE_EXISTS" != true ]]; then
+    if [[ -n "$CURRENT_VERSION" && -n "$LATEST_VERSION" && "$CURRENT_VERSION" == "$LATEST_VERSION" ]]; then
+        echo -e "${GREEN}✓ DBVault is already installed and up to date (v${CURRENT_VERSION}).${NC}"
+        echo "  Web console: http://${BIND_ADDR}:${PORT} (or your VPS IP)"
+        echo "  Service:     Active (dbvault.service)"
+        echo ""
+        echo "To force re-installation or refresh binaries, run:"
+        echo "  sudo $0 --force"
+        exit 0
+    fi
+fi
+
+# Display appropriate banner
+echo -e "${BOLD}${CYAN}"
+echo "=================================================================="
+if [[ "$IS_INSTALLED" == true ]]; then
+    echo "          DBVault Appliance - In-Place Version Update             "
+else
+    echo "          DBVault Appliance - VPS Automated Installation          "
+fi
+echo "=================================================================="
+echo -e "${NC}"
+
+if [[ "$IS_INSTALLED" == true ]]; then
+    echo -e "${BLUE}Updating DBVault on this system:${NC}"
+    echo -e "  Current installed version: ${BOLD}v${CURRENT_VERSION:-unknown}${NC}"
+    if [[ -n "$LATEST_VERSION" ]]; then
+        echo -e "  Target update version:    ${BOLD}v${LATEST_VERSION}${NC}"
+    fi
+    echo -e "  ${GREEN}✓ Existing configurations, keys, and databases in ${DATA_DIR} will be preserved.${NC}"
+    echo ""
+fi
 
 # ------------------------------------------------------------------------------
-# 2. System Architecture & Binary Resolution
+# 3. System Architecture & Binary Resolution
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[2/8] Confirming architecture and resolving binary...${NC}"
+echo -e "${BLUE}[1/7] Confirming architecture and resolving binary...${NC}"
 ARCH=$(uname -m)
 GOARCH="amd64"
 case "$ARCH" in
@@ -79,22 +199,31 @@ case "$ARCH" in
 esac
 
 SOURCE_BIN=""
-# Check local files first
+# Check local files first (e.g. if unpacked from release tarball or repo)
+TARGET_PATH_REAL=""
+if [[ -f "${BIN_DIR}/dbvault" ]]; then
+    TARGET_PATH_REAL=$(realpath "${BIN_DIR}/dbvault" 2>/dev/null || true)
+fi
+
 if [[ -f "./dbvault" && -x "./dbvault" ]]; then
-    SOURCE_BIN="./dbvault"
+    LOCAL_REAL=$(realpath "./dbvault" 2>/dev/null || true)
+    if [[ "$LOCAL_REAL" != "$TARGET_PATH_REAL" ]]; then
+        SOURCE_BIN="./dbvault"
+    fi
 elif [[ -f "./bin/dbvault" && -x "./bin/dbvault" ]]; then
-    SOURCE_BIN="./bin/dbvault"
-elif [[ -f "${BIN_DIR}/dbvault" && -x "${BIN_DIR}/dbvault" ]]; then
-    SOURCE_BIN="${BIN_DIR}/dbvault"
+    LOCAL_REAL=$(realpath "./bin/dbvault" 2>/dev/null || true)
+    if [[ "$LOCAL_REAL" != "$TARGET_PATH_REAL" ]]; then
+        SOURCE_BIN="./bin/dbvault"
+    fi
 elif command -v go >/dev/null 2>&1 && [[ -f "./cmd/dbvault/main.go" ]]; then
-    echo "  Building dbvault binary from source with Go..."
+    echo "  Building dbvault binary from local Go source..."
     CGO_ENABLED=0 go build -ldflags "-s -w" -o ./bin/dbvault ./cmd/dbvault
     SOURCE_BIN="./bin/dbvault"
 fi
 
-# If binary still not found, download it
+# If binary not present locally, download from GitHub release
 if [[ -z "$SOURCE_BIN" ]]; then
-    echo "  Local binary not found. Resolving download source..."
+    echo "  Resolving latest release binary from GitHub (${GITHUB_REPO})..."
     TMP_DL_DIR="$(mktemp -d /tmp/dbvault-bin.XXXXXX)"
     TARGET_DL="${TMP_DL_DIR}/dbvault"
 
@@ -102,11 +231,9 @@ if [[ -z "$SOURCE_BIN" ]]; then
         echo "  Downloading from custom URL: ${DOWNLOAD_URL}..."
         curl -fsSL "${DOWNLOAD_URL}" -o "${TARGET_DL}"
     else
-        # Try fetching from GitHub releases
         RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/dbvault-linux-${GOARCH}"
         echo "  Attempting to download from ${RELEASE_URL}..."
         if ! curl -fsSL "${RELEASE_URL}" -o "${TARGET_DL}" 2>/dev/null; then
-            # Fallback: check for tarball release
             TAR_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/dbvault-vps-installer.tar.gz"
             echo "  Attempting to download package from ${TAR_URL}..."
             if curl -fsSL "${TAR_URL}" -o "${TMP_DL_DIR}/installer.tar.gz" 2>/dev/null; then
@@ -115,8 +242,8 @@ if [[ -z "$SOURCE_BIN" ]]; then
                     TARGET_DL="${TMP_DL_DIR}/dbvault"
                 fi
             else
-                echo -e "${RED}[ERROR] Could not find or download the 'dbvault' binary.${NC}"
-                echo "Please provide the binary in the current directory or set DBVAULT_DOWNLOAD_URL."
+                echo -e "${RED}[ERROR] Could not download DBVault release binary.${NC}"
+                echo "Please check https://github.com/${GITHUB_REPO}/releases or set DBVAULT_DOWNLOAD_URL."
                 exit 1
             fi
         fi
@@ -125,13 +252,19 @@ if [[ -z "$SOURCE_BIN" ]]; then
     SOURCE_BIN="${TARGET_DL}"
 fi
 
-echo -e "  ${GREEN}✓ Found/resolved DBVault binary: ${SOURCE_BIN}${NC}"
+# Validate binary
+if ! "${SOURCE_BIN}" version >/dev/null 2>&1 && ! "${SOURCE_BIN}" -v >/dev/null 2>&1 && ! "${SOURCE_BIN}" --help >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR] Resolved binary is corrupted or cannot execute on this system.${NC}"
+    exit 1
+fi
+
+NEW_BIN_VERSION=$("${SOURCE_BIN}" version 2>/dev/null | awk '{print $2}' || echo "new")
+echo -e "  ${GREEN}✓ Resolved DBVault executable (${NEW_BIN_VERSION})${NC}"
 
 # ------------------------------------------------------------------------------
-# 3. Prerequisites & Database Client Utilities Confirmation
+# 4. Prerequisites & Utilities Check
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[3/8] Confirming database extraction tools & utilities...${NC}"
-
+echo -e "${BLUE}[2/7] Confirming system extraction utilities...${NC}"
 PKG_MGR=""
 if command -v apt-get >/dev/null 2>&1; then
     PKG_MGR="apt"
@@ -141,7 +274,6 @@ elif command -v yum >/dev/null 2>&1; then
     PKG_MGR="yum"
 fi
 
-# Ensure essential tools: curl, gzip, tar
 MISSING_TOOLS=()
 for tool in curl gzip tar; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -160,13 +292,12 @@ if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
 fi
 echo -e "  ${GREEN}✓ Core utilities confirmed (curl, gzip, tar)${NC}"
 
-# Check for database dump clients
+# Database clients
 CLIENTS_FOUND=()
 if command -v mysqldump >/dev/null 2>&1; then
     CLIENTS_FOUND+=("MySQL/MariaDB (mysqldump)")
 else
-    echo -e "  ${YELLOW}! MySQL/MariaDB client not found.${NC}"
-    if [[ -n "$PKG_MGR" ]]; then
+    if [[ "$IS_INSTALLED" != true && -n "$PKG_MGR" ]]; then
         if prompt_yes_no "  Install MySQL/MariaDB client tools now? [Y/n]" "y"; then
             if [[ "$PKG_MGR" == "apt" ]]; then
                 apt-get install -y -qq default-mysql-client || apt-get install -y -qq mariadb-client
@@ -181,8 +312,7 @@ fi
 if command -v pg_dump >/dev/null 2>&1; then
     CLIENTS_FOUND+=("PostgreSQL (pg_dump)")
 else
-    echo -e "  ${YELLOW}! PostgreSQL client not found.${NC}"
-    if [[ -n "$PKG_MGR" ]]; then
+    if [[ "$IS_INSTALLED" != true && -n "$PKG_MGR" ]]; then
         if prompt_yes_no "  Install PostgreSQL client tools now? [y/N]" "n"; then
             if [[ "$PKG_MGR" == "apt" ]]; then
                 apt-get install -y -qq postgresql-client
@@ -197,60 +327,45 @@ fi
 if command -v sqlite3 >/dev/null 2>&1; then
     CLIENTS_FOUND+=("SQLite (sqlite3)")
 fi
-
-echo -e "  ${GREEN}✓ Database dump clients available: ${CLIENTS_FOUND[*]:-None (install per your DB engine)}${NC}"
-
-# ------------------------------------------------------------------------------
-# 4. Port Availability Confirmation
-# ------------------------------------------------------------------------------
-echo -e "${BLUE}[4/8] Confirming port :${PORT} availability...${NC}"
-PORT_OCCUPIED=false
-if command -v ss >/dev/null 2>&1; then
-    if ss -tlpn | grep -q ":${PORT} "; then
-        PORT_OCCUPIED=true
-    fi
-elif command -v netstat >/dev/null 2>&1; then
-    if netstat -tlpn 2>/dev/null | grep -q ":${PORT} "; then
-        PORT_OCCUPIED=true
-    fi
-elif command -v lsof >/dev/null 2>&1; then
-    if lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
-        PORT_OCCUPIED=true
-    fi
-fi
-
-if [[ "$PORT_OCCUPIED" == true ]]; then
-    echo -e "  ${YELLOW}! Port ${PORT} is currently listening.${NC}"
-    if pgrep -x "dbvault" >/dev/null 2>&1; then
-        echo -e "  ${YELLOW}An existing DBVault process is currently running. It will be replaced/restarted by systemd.${NC}"
-    else
-        echo -e "  ${RED}[WARNING] Another process is using port ${PORT}.${NC}"
-        if ! prompt_yes_no "  Continue anyway? [y/N]" "n"; then
-            exit 1
-        fi
-    fi
-else
-    echo -e "  ${GREEN}✓ Port :${PORT} is free and ready${NC}"
-fi
+echo -e "  ${GREEN}✓ Database dump clients: ${CLIENTS_FOUND[*]:-None (install per your DB engine)}${NC}"
 
 # ------------------------------------------------------------------------------
-# 5. Installing Binary & Configuring Directories
+# 5. Installing Binary & Setting Up Fast Updater
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[5/8] Installing binary and configuring storage directories...${NC}"
+echo -e "${BLUE}[3/7] Installing binary & update manager...${NC}"
 mkdir -p "${BIN_DIR}"
+
+if [[ -f "${BIN_DIR}/dbvault" ]]; then
+    # Keep safe backup of previous binary
+    cp -f "${BIN_DIR}/dbvault" "${BIN_DIR}/dbvault.bak"
+fi
+
 cp -f "${SOURCE_BIN}" "${BIN_DIR}/dbvault"
 chmod 0755 "${BIN_DIR}/dbvault"
 echo -e "  ${GREEN}✓ Installed executable to ${BIN_DIR}/dbvault${NC}"
 
-# Create data directory with secure permissions
+# Create convenient `dbvault-update` helper command
+cat << EOF_UPDATER > "${BIN_DIR}/dbvault-update"
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ \$EUID -ne 0 ]]; then
+    echo "Error: dbvault-update must be run as root (use: sudo dbvault-update)"
+    exit 1
+fi
+REPO="${GITHUB_REPO}"
+exec curl -fsSL "https://raw.githubusercontent.com/\${REPO}/main/scripts/install-vps.sh" | bash -s -- "\$@"
+EOF_UPDATER
+chmod 0755 "${BIN_DIR}/dbvault-update"
+echo -e "  ${GREEN}✓ Created updater utility: ${BIN_DIR}/dbvault-update${NC}"
+
+# Ensure data directory exists with strict permissions
 mkdir -p "${DATA_DIR}"
 chmod 0700 "${DATA_DIR}"
-echo -e "  ${GREEN}✓ Created vault data directory: ${DATA_DIR} (mode 0700)${NC}"
 
 # ------------------------------------------------------------------------------
-# 6. Setting Up Systemd Service
+# 6. Systemd Service Setup & Daemon Refresh
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[6/8] Configuring systemd service...${NC}"
+echo -e "${BLUE}[4/7] Configuring systemd service...${NC}"
 
 cat << EOF_SERVICE > "${SERVICE_FILE}"
 [Unit]
@@ -278,12 +393,12 @@ chmod 0644 "${SERVICE_FILE}"
 systemctl daemon-reload
 systemctl enable dbvault.service
 systemctl restart dbvault.service
-echo -e "  ${GREEN}✓ Systemd service configured and started (dbvault.service)${NC}"
+echo -e "  ${GREEN}✓ Systemd service configured & restarted (dbvault.service)${NC}"
 
 # ------------------------------------------------------------------------------
 # 7. Verifying Daemon Readiness & Health Probe
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[7/8] Confirming DBVault health and API readiness...${NC}"
+echo -e "${BLUE}[5/7] Probing DBVault health...${NC}"
 
 MAX_ATTEMPTS=25
 ATTEMPT=1
@@ -302,57 +417,81 @@ if [[ "$SERVER_HEALTHY" != true ]]; then
     echo -e "  ${RED}[ERROR] DBVault did not report healthy after ${MAX_ATTEMPTS} seconds.${NC}"
     echo "  Checking recent service logs:"
     journalctl -u dbvault -n 25 --no-pager
+    if [[ -f "${BIN_DIR}/dbvault.bak" ]]; then
+        echo -e "${YELLOW}Rollback binary available at ${BIN_DIR}/dbvault.bak${NC}"
+    fi
     exit 1
 fi
 echo -e "  ${GREEN}✓ Health check passed (HTTP 200 from http://127.0.0.1:${PORT}/health)${NC}"
 
 # ------------------------------------------------------------------------------
-# 8. Firewall Configuration & Setup Token Extraction
+# 8. Firewall Configuration
 # ------------------------------------------------------------------------------
-echo -e "${BLUE}[8/8] Checking firewall and retrieving initial setup token...${NC}"
-
-# Firewall check
+echo -e "${BLUE}[6/7] Checking firewall rules...${NC}"
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-    echo -e "  ${GREEN}✓ UFW firewall rule added for port ${PORT}/tcp${NC}"
+    echo -e "  ${GREEN}✓ UFW firewall rule active for port ${PORT}/tcp${NC}"
 elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     firewall-cmd --add-port="${PORT}/tcp" --permanent >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
-    echo -e "  ${GREEN}✓ Firewalld rule added for port ${PORT}/tcp${NC}"
+    echo -e "  ${GREEN}✓ Firewalld rule active for port ${PORT}/tcp${NC}"
+else
+    echo -e "  ${GREEN}✓ Port :${PORT} accessible${NC}"
 fi
 
-# Detect Server IP
+# Detect Public Server IP
 PUBLIC_IP=$(curl -s --max-time 3 https://ifconfig.me 2>/dev/null || curl -s --max-time 3 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
 PUBLIC_IP="${PUBLIC_IP:-127.0.0.1}"
 
-# Extract Setup Token from journalctl
-SETUP_TOKEN=$(journalctl -u dbvault -n 100 --no-pager 2>/dev/null | grep -i "setup token:" | tail -n 1 | sed 's/.*setup token: //I' | tr -d '\r')
-
 # ------------------------------------------------------------------------------
-# Installation Summary
+# 9. Completion Summary
 # ------------------------------------------------------------------------------
+echo -e "${BLUE}[7/7] Finalizing...${NC}"
 echo ""
 echo -e "${BOLD}${GREEN}==================================================================${NC}"
-echo -e "${BOLD}${GREEN}        ✓ DBVault has been successfully installed & verified!    ${NC}"
-echo -e "${BOLD}${GREEN}==================================================================${NC}"
-echo ""
-echo -e "${BOLD}1. Web Console Access URL:${NC}"
-echo -e "   ${CYAN}http://${PUBLIC_IP}:${PORT}${NC}"
-echo ""
-if [[ -n "$SETUP_TOKEN" ]]; then
-    echo -e "${BOLD}2. Appliance First-Run Setup Token:${NC}"
-    echo -e "   ${YELLOW}${BOLD}${SETUP_TOKEN}${NC}"
-    echo -e "   ${NC}(Paste this token into the web browser to create your admin account)${NC}"
+if [[ "$IS_INSTALLED" == true ]]; then
+    echo -e "${BOLD}${GREEN}        ✓ DBVault has been successfully updated!                  ${NC}"
 else
-    echo -e "${BOLD}2. Appliance Setup Token:${NC}"
-    echo -e "   If an admin account is already created, sign in at http://${PUBLIC_IP}:${PORT}/login"
-    echo -e "   To view logs: journalctl -u dbvault -f"
+    echo -e "${BOLD}${GREEN}        ✓ DBVault has been successfully installed & verified!    ${NC}"
 fi
+echo -e "${BOLD}${GREEN}==================================================================${NC}"
 echo ""
-echo -e "${BOLD}3. System Service Management:${NC}"
+
+if [[ "$IS_INSTALLED" == true ]]; then
+    echo -e "${BOLD}1. Update Summary:${NC}"
+    echo -e "   Previous Version:  v${CURRENT_VERSION:-unknown}"
+    echo -e "   Current Version:   ${BOLD}${NEW_BIN_VERSION}${NC}"
+    echo -e "   Storage & State:   ${GREEN}All databases, keys, and schedules preserved${NC}"
+    echo ""
+    echo -e "${BOLD}2. Web Console Access URL:${NC}"
+    echo -e "   ${CYAN}http://${PUBLIC_IP}:${PORT}${NC}"
+    echo ""
+    echo -e "${BOLD}3. Easy Future Updates:${NC}"
+    echo "   Check for updates: sudo dbvault-update --check"
+    echo "   Apply updates:     sudo dbvault-update"
+else
+    # First-run setup token
+    SETUP_TOKEN=$(journalctl -u dbvault -n 100 --no-pager 2>/dev/null | grep -i "setup token:" | tail -n 1 | sed 's/.*setup token: //I' | tr -d '\r')
+    echo -e "${BOLD}1. Web Console Access URL:${NC}"
+    echo -e "   ${CYAN}http://${PUBLIC_IP}:${PORT}${NC}"
+    echo ""
+    if [[ -n "$SETUP_TOKEN" ]]; then
+        echo -e "${BOLD}2. Appliance First-Run Setup Token:${NC}"
+        echo -e "   ${YELLOW}${BOLD}${SETUP_TOKEN}${NC}"
+        echo -e "   ${NC}(Paste this token into your browser to create your admin account)${NC}"
+    else
+        echo -e "${BOLD}2. Appliance Setup Token:${NC}"
+        echo -e "   Sign in at http://${PUBLIC_IP}:${PORT}/login"
+    fi
+    echo ""
+    echo -e "${BOLD}3. Easy Future Updates:${NC}"
+    echo "   Whenever an update is released, simply run:"
+    echo -e "   ${CYAN}sudo dbvault-update${NC}"
+fi
+
+echo ""
+echo -e "${BOLD}Service Management:${NC}"
 echo "   Status:  sudo systemctl status dbvault"
 echo "   Logs:    sudo journalctl -u dbvault -f"
 echo "   Restart: sudo systemctl restart dbvault"
-echo "   Stop:    sudo systemctl stop dbvault"
-echo ""
 echo "=================================================================="

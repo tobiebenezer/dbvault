@@ -10,7 +10,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="${DBVAULT_VERSION:-0.1.0-alpha}"
+VERSION="${DBVAULT_VERSION:-0.2.0}"
 PACKAGE_NAME="dbvault-vps-installer.tar.gz"
 
 echo "==> Building web assets..."

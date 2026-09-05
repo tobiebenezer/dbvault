@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -50,12 +51,20 @@ import (
 	dbvserver "github.com/dbvault/dbvault/internal/server"
 )
 
+var version = "0.2.0"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		return
 	}
 	switch os.Args[1] {
+	case "version", "-v", "--version":
+		fmt.Printf("dbvault v%s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		return
+	case "update":
+		upgradeCmd(os.Args[2:])
+		return
 	case "server":
 		serverCmd(os.Args[2:])
 	case "install":
@@ -1194,17 +1203,62 @@ func installCmd(args []string) {
 
 func upgradeCmd(args []string) {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
-	check := fs.Bool("check", false, "check only")
+	check := fs.Bool("check", false, "check for available updates without applying")
 	rollback := fs.Bool("rollback", false, "rollback to previous version")
 	target := fs.String("target", "latest", "target version")
 	_ = fs.Parse(args)
 	if *rollback {
-		fmt.Println("upgrade rollback plan: stop service, restore previous binary, restore compatible config, restart service")
+		fmt.Println("upgrade rollback plan: stop service, restore /usr/local/bin/dbvault.bak, restart service")
 		return
 	}
+
+	repo := os.Getenv("DBVAULT_REPO")
+	if repo == "" {
+		repo = "tobiebenezer/dbvault"
+	}
+
+	fmt.Printf("Current DBVault version: v%s\n", version)
+	fmt.Printf("Checking for updates from https://github.com/%s...\n", repo)
+
+	client := &http.Client{Timeout: 6 * time.Second}
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo), nil)
+	if err == nil {
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		req.Header.Set("User-Agent", "dbvault/"+version)
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			var release struct {
+				TagName string `json:"tag_name"`
+				Name    string `json:"name"`
+				HtmlURL string `json:"html_url"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&release); err == nil && release.TagName != "" {
+				latestVer := strings.TrimPrefix(release.TagName, "v")
+				curVer := strings.TrimPrefix(version, "v")
+				if latestVer == curVer {
+					fmt.Printf("✓ DBVault is already up to date (v%s).\n", curVer)
+					return
+				}
+				fmt.Printf("→ An updated release is available: %s (current: v%s)\n", release.TagName, curVer)
+				if release.HtmlURL != "" {
+					fmt.Printf("  Release notes: %s\n\n", release.HtmlURL)
+				}
+				if *check {
+					return
+				}
+				fmt.Println("To apply this update on your VPS, run:")
+				fmt.Printf("  curl -fsSL https://raw.githubusercontent.com/%s/main/scripts/install-vps.sh | sudo bash\n", repo)
+				fmt.Println("  or if dbvault-update is installed:")
+				fmt.Println("  sudo dbvault-update")
+				return
+			}
+		}
+	}
+
 	plan := installer.PlanUpgrade("current", *target)
 	if *check {
-		fmt.Println("upgrade available check scaffold; target", *target)
+		fmt.Println("upgrade available check; target", *target)
 	}
 	for _, step := range plan.Steps {
 		fmt.Println(step)
