@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Production build flags now enable full cloud storage adapters by default.
 - Makefile updated with `install-vps` and `package-vps` targets.
 - Documentation refreshed with exact repository paths (`tobiebenezer/dbvault`) and download commands.
+- Streamlined all 14 web console views: removed redundant descriptions, explanatory sub-texts, and card subtitles for a clean, minimalist UI.
+- Sanitized repository documentation: pruned 49 obsolete development phase reports, milestone checklists, and temporary session logs.
 
 ---
 

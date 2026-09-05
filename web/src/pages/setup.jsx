@@ -88,7 +88,6 @@ export function SetupPage() {
     <div className="page setup-page">
       <PageHeader
         title="Set up DBVault"
-        description="First-run appliance configuration. Connect database sources, storage destinations, and generate validated runtime configs."
         actions={[
           <Button key="exit" label="Exit to Console" onClick={() => Store.navigate('/')} tone="secondary" />
         ]}

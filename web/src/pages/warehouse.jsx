@@ -204,7 +204,6 @@ export function WarehousePage() {
     <div className="page">
       <PageHeader
         title="Data Warehouse & Analytics"
-        description="Analytical SQL workbench over Apache Parquet datasets extracted from your configured databases."
         actions={[
           <Button key="bi" label="Connect BI Tool" onClick={() => setActiveTab('powerbi')} tone="primary" icon="link" />,
           <Button key="sync" label="Sync Datasets" onClick={() => handleTriggerSync('')} tone="secondary" icon="refresh" />,
@@ -609,7 +608,6 @@ export function WarehousePage() {
       {activeTab === 'catalog' && (
         <Card
           title="Analytical Parquet Datasets & Columnar Storage"
-          subtitle="Direct columnar storage snapshots generated continuously for lightning-fast OLAP queries."
           noPadding
         >
           {(!catalog || !catalog.databases || catalog.databases.length === 0) ? (
@@ -775,7 +773,7 @@ function PowerBIConnectorsHub() {
   if (loading) return <Card title="BI Connections"><LoadingState label="Loading BI connections…" /></Card>;
   return (
     <div className="stack-lg">
-      <Card title="Connect Power BI and other tools" subtitle="Create a scoped, read-only connection before copying a feed into Power BI, Excel, Tableau, Metabase, Superset, or Python." action={<Badge label="Token-protected feeds" tone="success" />}>
+      <Card title="Connect Power BI and other tools" action={<Badge label="Token-protected feeds" tone="success" />}>
         <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16 }}>
           <div className="stack-sm">
             <label className="text-xs font-semibold">Tool<select className="form-input" value={provider} onChange={(e) => setProvider(e.currentTarget.value)}><option value="powerbi">Microsoft Power BI</option><option value="excel">Microsoft Excel</option><option value="tableau">Tableau</option><option value="metabase">Metabase</option><option value="superset">Apache Superset</option><option value="python">Python / Pandas</option></select></label>
@@ -789,7 +787,7 @@ function PowerBIConnectorsHub() {
         </div>
       </Card>
 
-      <Card title={`Select datasets (${selected.length} selected)`} subtitle="Only selected tables will be visible through the connection." noPadding>
+      <Card title={`Select datasets (${selected.length} selected)`} noPadding>
         {datasets.length === 0 ? <EmptyState title="No synchronized datasets" text="Run a successful warehouse sync before creating a BI connection." /> : <DataTable headers={[{ label: 'Select', width: '70px' }, { label: 'Database' }, { label: 'Table' }, { label: 'Rows' }]}>{datasets.map((ds) => { const key = `${ds.feed_database || ds.database_id || 'duckdb'}.${ds.table_name}`; const checked = selected.some((item) => `${item.database}.${item.table}` === key); return <tr key={key}><td><input type="checkbox" checked={checked} onChange={() => toggleDataset(ds)} /></td><td className="cell-primary"><strong>{ds.database_name || ds.database_id}</strong></td><td><code>{ds.table_name}</code></td><td className="cell-mono text-xs">{(ds.estimated_rows || 0).toLocaleString()}</td></tr>; })}</DataTable>}
       </Card>
 
@@ -938,7 +936,6 @@ function WarehouseConnectorsPanel({ connectors = [], onSync }) {
       {/* Active Connectors Section */}
       <Card
         title={`Configured Analytical Destinations (${list.length})`}
-        subtitle="Downstream analytical data engines synchronized continuously from the DBVault columnar lakehouse."
         action={
           <Button
             label="Add Connector"

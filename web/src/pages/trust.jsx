@@ -133,7 +133,6 @@ export function TrustPage() {
     <div className="page">
       <PageHeader
         title="Trust & Security Center"
-        description="Continuous cryptographic verification, SOC2 / HIPAA compliance posture, and mathematical proof of recoverability."
         actions={[
           <Button
             key="verify"
@@ -189,8 +188,7 @@ export function TrustPage() {
 
       {/* Two-Person Dual Authorization Review Queue */}
       <Card
-        title="Two-Person Dual Authorization Queue (Destructive Guardrails)"
-        subtitle="In accordance with NIST AC-3 and SOC2 controls, destructive production database replacements require secondary operator authorization."
+        title="Two-Person Dual Authorization Queue"
         noPadding
       >
         {pendingApprovals.length === 0 ? (
@@ -255,7 +253,6 @@ export function TrustPage() {
       {/* Compliance Frameworks & Attestation Matrix */}
       <Card
         title="Live Compliance Controls & Attestation Proofs"
-        subtitle="Continuous evidence collection automatically mapped to enterprise security and regulatory frameworks."
         noPadding
       >
         <DataTable
@@ -340,8 +337,7 @@ function AuditLogForensicsSection({ onVerify, verifying, verified }) {
 
   return (
     <Card
-      title="Cryptographic Immutable Audit Log & SHA-256 Hash Chain"
-      subtitle="Every administrative and automated data action is cryptographically signed and chained with SHA-256 Merkle hashes."
+      title="Cryptographic Immutable Audit Log & Hash Chain"
       action={
         <Button
           label={verifying ? "Verifying Chain…" : "Verify Cryptographic Chain"}

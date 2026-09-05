@@ -67,7 +67,6 @@ export function OverviewPage() {
     <div className="page">
       <PageHeader
         title="Appliance Overview"
-        description="System health, continuous archive status, and verified recoverability."
         actions={[
           <Button
             key="drill"
@@ -210,7 +209,6 @@ export function OverviewPage() {
       {/* Protected Databases Section */}
       <Card
         title="Database Instances"
-        subtitle="Connected database instances, continuous streaming state, and backup triggers."
         noPadding={viewMode === 'table'}
         action={
           <div className="row-sm">
@@ -312,7 +310,6 @@ export function OverviewPage() {
       {/* Recent Operations Log */}
       <Card
         title="Recent Operations"
-        subtitle="Live backup tasks, verification drills, and continuous replication streams."
         noPadding
         action={
           <Button

@@ -131,7 +131,6 @@ export function RepositoriesPage() {
     <div className="page">
       <PageHeader
         title="Storage & Repositories"
-        description="Zero-knowledge encrypted storage targets (Cloudflare R2, AWS S3, MinIO) and multi-region replication mirrors."
         actions={[
           <Button
             key="gc"

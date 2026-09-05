@@ -47,7 +47,6 @@ export function AlertsPage({ embedded = false }) {
       {!embedded && (
         <PageHeader
           title="Alerts & Incidents"
-          description="Active protection warnings, recovery chain gap alerts, and storage quota notifications."
           actions={[
             <Button key="doc" label="Run system doctor" onClick={() => ProductActions.doctor()} tone="secondary" />
           ]}

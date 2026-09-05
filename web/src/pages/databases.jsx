@@ -114,7 +114,6 @@ export function DatabasesPage() {
     <div className="page">
       <PageHeader
         title="Databases & Schedules"
-        description="Connect database engines, discover available schemas with storage sizes, and manage automated backup policies."
         actions={[
           <Button key="probe" label="Connect & Discover Databases" onClick={() => setShowProbeModal(true)} tone="primary" icon="search" />,
           <Button key="sched" label="New Schedule" onClick={() => setShowScheduleModal(true)} tone="secondary" icon="play" />
@@ -225,7 +224,6 @@ export function DatabasesPage() {
       {activeTab === 'schedules' && (
         <Card
           title="Automated Backup & Archive Schedules"
-          subtitle="Recurring cron policies for snapshots, differential backups, and continuous log retention."
           noPadding
           action={
             <Button

@@ -172,7 +172,6 @@ DBVault Zero-Knowledge Appliance`;
     <div className="page">
       <PageHeader
         title="Settings & Management"
-        description="Appliance configuration, team access controls, notification channels, and fleet nodes."
         actions={[
           <Button key="runbook" label="Export DR Runbook" onClick={handleGenerateRunbook} tone="secondary" icon="download" />,
           <Button key="doc" label="Run Preflight Doctor" onClick={handleRunDoctor} tone="primary" icon="refresh" />
@@ -314,7 +313,7 @@ DBVault Zero-Knowledge Appliance`;
       {activeTab === 'general' && (
         <div className="stack-md">
           {/* Database Connections Architecture Overview */}
-          <Card title="Appliance Architecture & Database Connections" subtitle="DBVault maintains a strict separation between internal state storage and your target databases.">
+          <Card title="Appliance Architecture & Database Connections">
             <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
               <div className="metric-card" style={{ padding: '16px', background: 'var(--panel-inset)', borderRadius: '8px' }}>
                 <div className="row-between mb-xs">
@@ -574,8 +573,7 @@ function MasterKeyManagementCard() {
   return (
     <div className="stack-md">
       <Card
-        title="Zero-Knowledge Master Encryption Key & Disaster Recovery"
-        subtitle="Your Master Key is the ONLY key that can decrypt backups stored in Cloudflare R2 / S3. Store a copy in your password manager (1Password / Bitwarden)."
+        title="Master Encryption Key & Disaster Recovery"
       >
         <div className="stack-md">
           <div className="grid-auto text-sm">

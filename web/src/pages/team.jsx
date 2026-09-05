@@ -59,8 +59,7 @@ export function TeamPage({ embedded = false }) {
     <div className={embedded ? "" : "page"}>
       {!embedded && (
         <PageHeader
-          title="Team & Access Control (RBAC)"
-          description="Manage workspace operators, granular permissions, and two-person production restore approvers."
+          title="Team & Access Control"
           actions={[
             <Button
               key="invite"

@@ -325,6 +325,3 @@ Backups are promises. DBVault tests the promise.
 
 One Go binary. Your database. Your storage. Verified restores.
 
-## Phase 8I UI cleanup
-
-The embedded console now uses a single all-white surface system with compact navigation, restrained typography, simple bordered rows, outlined status chips, and emerald reserved for primary actions and healthy state. Phase 8I preserves the connected Phase 8G actions and Phase 8D live job/SSE wiring while removing residual prototype styling.

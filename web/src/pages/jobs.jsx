@@ -48,7 +48,6 @@ export function JobsPage() {
     <div className="page">
       <PageHeader
         title="Activity, Alerts & Audit"
-        description="Unified hub for live backup tasks, system health warnings, and cryptographically verified audit records."
         actions={[
           <Button key="drill" label="Run Restore Drill" onClick={() => createJobFromInventory('restore_drill')} tone="secondary" />,
           <Button key="backup" label="Back Up Now" onClick={() => createJobFromInventory('backup')} tone="primary" icon="play" />

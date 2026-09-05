@@ -77,7 +77,6 @@ export function RecoveryPage() {
       <div className="page">
         <PageHeader
           title="Recovery Studio"
-          description="Point-in-Time Recovery (PITR), continuous WAL stream scrubbing, verified restore drills, and sandbox provisioning."
         />
         <EmptyState
           icon="shield"
@@ -158,7 +157,6 @@ export function RecoveryPage() {
     <div className="page">
       <PageHeader
         title="Recovery Studio"
-        description="Point-in-Time Recovery, direct database restores, verified audit drills, and decrypted SQL exports."
         actions={[
           <Button
             key="sql"
@@ -282,7 +280,7 @@ export function RecoveryPage() {
       {activeTab === 'quick-restore' && (
         <div className="stack-md">
           <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px' }}>
-            <Card title="Quick Database Restore" subtitle="Replay snapshot directly into original database or a new side-by-side database">
+            <Card title="Quick Database Restore">
               <div className="stack-sm">
                 <div className="row-between mb-sm" style={{ padding: '10px 14px', background: 'var(--panel-inset)', borderRadius: '6px' }}>
                   <span className="text-xs text-muted font-semibold">Source Snapshot</span>
@@ -349,7 +347,7 @@ export function RecoveryPage() {
               </div>
             </Card>
 
-            <Card title="Instant Decrypted SQL Export" subtitle="Download plain SQL dump file for local inspection, DBeaver, or manual replay">
+            <Card title="Instant Decrypted SQL Export">
               <div className="stack-sm">
                 <div style={{ padding: '12px 14px', background: 'var(--panel-inset)', borderRadius: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
                   Exports the latest verified snapshot, fully decrypted with your Master Key and decompressed into plain standard SQL.
@@ -412,7 +410,6 @@ export function RecoveryPage() {
           {timeline?.segments && timeline.segments.length > 0 && (
             <Card
               title={`Archived WAL Segments & LSN Checkpoints (${timeline.segments.length} segments)`}
-              subtitle="Contiguous Write-Ahead Log segments verified with SHA-256 Merkle parity for sub-second Point-in-Time Recovery."
               noPadding
             >
               <DataTable
@@ -841,7 +838,6 @@ function MaskingRulesPanel() {
     <div className="stack-lg">
       <Card
         title="Automated PII & Sensitive Data Masking Policy"
-        subtitle="Pre-configured data transformation strategies applied automatically during staging sandbox provisioning and test exports."
         action={<Badge label="Zero-PII Staging Protected" tone="success" />}
         noPadding
       >

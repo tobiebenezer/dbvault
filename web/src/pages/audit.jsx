@@ -51,7 +51,6 @@ export function AuditPage({ embedded = false }) {
       {!embedded && (
         <PageHeader
           title="Audit Logs & Cryptographic Merkle Trail"
-          description="Tamper-evident, cryptographically chained SHA-256 audit trail for SOC2 Type II, HIPAA, and ISO 27001 compliance."
           actions={[
             <Button
               key="export"

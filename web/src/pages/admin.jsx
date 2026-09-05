@@ -41,8 +41,7 @@ export function AdminFleetPage({ embedded = false }) {
     <div className={embedded ? "" : "page"}>
       {!embedded && (
         <PageHeader
-          title="Multi-Tenant Super-Admin & Fleet Control Plane"
-          description="Global tenant overview, cross-region agent cluster health, and metered subscription revenue."
+          title="Fleet & Super-Admin"
           actions={[
             <Button
               key="enrol"
@@ -124,7 +123,6 @@ export function AdminFleetPage({ embedded = false }) {
       {/* Connected Outbound Agents Table */}
       <Card
         title={`Outbound Agent Fleet (${agents.length} nodes connected)`}
-        subtitle="Private VPC & On-Premise database agent connections (outbound mTLS port 443 — 0 firewall openings)"
         noPadding
       >
         <DataTable

@@ -41,8 +41,7 @@ export function BillingPage({ embedded = false }) {
     <div className={embedded ? "" : "page"}>
       {!embedded && (
         <PageHeader
-          title="Usage Metering & Cloud Cost Attribution"
-          description="Transparent storage metering, egress cost breakdown, and cloud infrastructure savings."
+          title="Usage Metering & Costs"
           actions={[
             <Button
               key="export"
