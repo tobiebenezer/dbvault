@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Production build flags now enable full cloud storage adapters by default.
+- Published GitHub release `v0.2.0` with downloadable assets (`dbvault-linux-amd64`, `dbvault-vps-installer.tar.gz`) so the one-liner VPS installer resolves binaries from GitHub Releases.
 - Makefile updated with `install-vps` and `package-vps` targets.
 - Documentation refreshed with exact repository paths (`tobiebenezer/dbvault`) and download commands.
 - Streamlined all 14 web console views: removed redundant descriptions, explanatory sub-texts, and card subtitles for a clean, minimalist UI.
