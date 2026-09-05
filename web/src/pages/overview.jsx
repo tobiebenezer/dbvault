@@ -2,7 +2,7 @@ import { useState, useEffect } from 'preact/hooks';
 import { API } from '../api.js';
 import { Card, Button, Badge, PageHeader, MetricCard, DataTable, StatusIndicator, EmptyState, LoadingState, ErrorBox, Icon } from '../components/ui.jsx';
 import { StorageTopologyMap } from '../components/topology.jsx';
-import { formatDate, formatRelative, titleCase, databaseHasBackup } from '../format.js';
+import { formatDate, formatRelative, titleCase, databaseHasBackup, getJobTone, formatJobDuration } from '../format.js';
 import { Store } from '../state.js';
 import { ProductActions } from '../actions.js';
 
@@ -336,12 +336,18 @@ export function OverviewPage() {
             {latestJobs.map((j) => (
               <tr key={j.id}>
                 <td className="cell-primary">
-                  <strong>{j.type ? titleCase(j.type.replaceAll('_', ' ')) : 'Backup Job'}</strong>
+                  <button
+                    type="button"
+                    className="link-cell"
+                    onClick={() => Store.navigate(`/jobs/${j.id}`)}
+                  >
+                    <strong>{titleCase((j.job_type || j.type || 'job').replaceAll('_', ' '))}</strong>
+                  </button>
                 </td>
-                <td className="cell-mono text-xs">{j.resource_id || j.source_id || 'production-postgres'}</td>
-                <td><StatusIndicator label={titleCase(j.status || 'completed')} tone={j.status === 'completed' || j.status === 'finished' ? 'success' : j.status === 'failed' ? 'danger' : 'warning'} /></td>
+                <td className="cell-mono text-xs">{j.resource_name || j.resource_id || j.source_id || 'System'}</td>
+                <td><StatusIndicator label={titleCase(j.status || 'completed')} tone={getJobTone(j.status)} /></td>
                 <td className="cell-mono text-xs">{formatRelative(j.created_at || j.started_at)}</td>
-                <td className="cell-mono text-xs">{j.duration_seconds ? `${j.duration_seconds}s` : '12s'}</td>
+                <td className="cell-mono text-xs">{formatJobDuration(j)}</td>
               </tr>
             ))}
           </DataTable>

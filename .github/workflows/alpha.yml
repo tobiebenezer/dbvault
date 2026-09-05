@@ -17,6 +17,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+      - name: Install web dependencies
+        run: cd web && npm ci
       - name: Web test
         run: make web-test
       - name: Web build

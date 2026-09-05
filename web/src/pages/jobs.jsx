@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'preact/hooks';
 import { Card, Button, PageHeader, DataTable, SegmentedNav, StatusIndicator, EmptyState, LoadingState, ErrorBox } from '../components/ui.jsx';
-import { JobCard } from '../components/jobs/JobCard.jsx';
+import { JobActions } from '../components/jobs/JobActions.jsx';
 import { JobStageList } from '../components/jobs/JobStageList.jsx';
 import { JobLogViewer } from '../components/jobs/JobLogViewer.jsx';
 import { JobsStore } from '../state/jobs.js';
 import { JobsAPI } from '../api/jobs.js';
 import { Store } from '../state.js';
-import { formatRelative, titleCase } from '../format.js';
+import { formatRelative, titleCase, formatBytes, getJobTone, formatJobDuration } from '../format.js';
 import { API } from '../api.js';
 import { AlertsPage } from './alerts.jsx';
 import { AuditPage } from './audit.jsx';
@@ -33,9 +33,12 @@ export function JobsPage() {
   const allJobs = jobsState.orderedIds.map((id) => jobsState.byId[id]).filter(Boolean);
   const visible = filter === 'all'
     ? allJobs
-    : allJobs.filter((job) => filter === 'running'
-      ? ['queued', 'running', 'cancelling'].includes(job.status)
-      : job.status === filter);
+    : allJobs.filter((job) => {
+        if (filter === 'running') return ['queued', 'running', 'cancelling'].includes(job.status);
+        if (filter === 'completed') return ['completed', 'finished', 'succeeded', 'healthy', 'success'].includes(job.status);
+        if (filter === 'failed') return ['failed', 'dead_letter', 'error'].includes(job.status);
+        return job.status === filter;
+      });
 
   if (jobsState.loading && !allJobs.length && hubTab === 'jobs') {
     return <div className="page"><LoadingState label="Loading operations…" /></div>;
@@ -73,9 +76,9 @@ export function JobsPage() {
           <SegmentedNav
             tabs={[
               { id: 'all', label: 'All Operations', count: allJobs.length },
-              { id: 'running', label: 'Running', count: countJobs(allJobs, ['queued', 'running', 'cancelling']) },
-              { id: 'failed', label: 'Failed', count: countJobs(allJobs, ['failed']) },
-              { id: 'completed', label: 'Completed', count: countJobs(allJobs, ['completed']) }
+              { id: 'running', label: 'Running', count: countJobs(allJobs, 'running') },
+              { id: 'failed', label: 'Failed', count: countJobs(allJobs, 'failed') },
+              { id: 'completed', label: 'Completed', count: countJobs(allJobs, 'completed') }
             ]}
             activeId={filter}
             onSelect={(id) => {
@@ -94,16 +97,65 @@ export function JobsPage() {
               <DataTable
                 headers={[
                   { label: 'Operation' },
+                  { label: 'Target / Database' },
                   { label: 'Status' },
                   { label: 'Current Stage' },
                   { label: 'Progress' },
                   { label: 'Started' },
-                  { label: 'Duration' }
+                  { label: 'Duration' },
+                  { label: 'Actions', width: '160px' }
                 ]}
               >
-                {visible.map((job) => (
-                  <JobCard key={job.id} job={job} />
-                ))}
+                {visible.map((job) => {
+                  const percentage = Math.round(Math.max(0, Math.min(100, Number(job.percentage || 0))));
+                  const isIndeterminate = !job.bytes_total && percentage === 0 && ['running', 'queued'].includes(job.status);
+                  return (
+                    <tr key={job.id}>
+                      <td className="cell-primary">
+                        <button
+                          type="button"
+                          className="link-cell"
+                          onClick={() => Store.navigate(`/jobs/${job.id}`)}
+                        >
+                          <strong>{titleCase((job.job_type || job.type || 'job').replaceAll('_', ' '))}</strong>
+                        </button>
+                        <div className="text-xs text-muted cell-mono">{job.id}</div>
+                      </td>
+                      <td className="cell-mono text-xs">
+                        {job.resource_name || job.resource_id || job.source_id || 'System'}
+                      </td>
+                      <td>
+                        <StatusIndicator
+                          label={titleCase(job.status || 'queued')}
+                          tone={getJobTone(job.status)}
+                        />
+                      </td>
+                      <td className="text-sm">
+                        {titleCase((job.stage || job.status || 'queued').replaceAll('_', ' '))}
+                      </td>
+                      <td style={{ minWidth: '130px' }}>
+                        <div className="row-between text-xs mb-xs">
+                          <span>{isIndeterminate ? 'In progress' : `${percentage}%`}</span>
+                          {job.bytes_processed > 0 && <span className="text-muted">{formatBytes(job.bytes_processed)}</span>}
+                        </div>
+                        <div
+                          className={`progress-track ${isIndeterminate ? 'indeterminate' : ''}`}
+                          role="progressbar"
+                          aria-valuenow={isIndeterminate ? undefined : percentage}
+                          aria-valuemin="0"
+                          aria-valuemax="100"
+                        >
+                          <span style={isIndeterminate ? {} : { width: `${percentage}%` }} />
+                        </div>
+                      </td>
+                      <td className="cell-mono text-xs">{formatRelative(job.created_at || job.started_at)}</td>
+                      <td className="cell-mono text-xs">{formatJobDuration(job)}</td>
+                      <td className="cell-actions">
+                        <JobActions job={job} />
+                      </td>
+                    </tr>
+                  );
+                })}
               </DataTable>
             )}
           </Card>
@@ -113,14 +165,27 @@ export function JobsPage() {
   );
 }
 
-function countJobs(jobs, statuses) {
-  return jobs.filter((j) => statuses.includes(j.status)).length;
+function countJobs(jobs, filterType) {
+  if (filterType === 'running') {
+    return jobs.filter((j) => ['queued', 'running', 'cancelling'].includes(j.status)).length;
+  }
+  if (filterType === 'completed') {
+    return jobs.filter((j) => ['completed', 'finished', 'succeeded', 'healthy', 'success'].includes(j.status)).length;
+  }
+  if (filterType === 'failed') {
+    return jobs.filter((j) => ['failed', 'dead_letter', 'error'].includes(j.status)).length;
+  }
+  return jobs.filter((j) => j.status === filterType).length;
 }
 
 async function createJobFromInventory(type) {
   try {
     const inv = await API.inventory();
-    const primary = inv.databases?.[0]?.id || 'production-postgres';
+    const primary = inv.databases?.[0]?.id;
+    if (!primary) {
+      Store.toast('No database configured yet. Please configure a database first.', 'warning');
+      return;
+    }
     if (type === 'backup') {
       await JobsAPI.createBackup({ source_id: primary, type: 'full' });
       Store.toast('Backup job initiated', 'success');
@@ -178,8 +243,8 @@ function JobDetailPage({ jobId }) {
   return (
     <div className="page">
       <PageHeader
-        title={job.name || `${titleCase(job.type || 'Job')} (${job.id})`}
-        description={`Target database: ${job.resource_id || job.source_id || 'production-postgres'} · Run ID: ${job.id}`}
+        title={job.name || `${titleCase((job.job_type || job.type || 'job').replaceAll('_', ' '))} (${job.id})`}
+        description={`Target database: ${job.resource_name || job.resource_id || job.source_id || 'System'} · Run ID: ${job.id}`}
         actions={[
           <Button key="back" label="Back to All Jobs" onClick={() => Store.navigate('/jobs')} tone="secondary" />,
           isRunning && (
@@ -204,7 +269,7 @@ function JobDetailPage({ jobId }) {
         <div className="metric-card">
           <span className="metric-label">Status</span>
           <div className="row-sm mt-xs">
-            <StatusIndicator label={titleCase(job.status || 'unknown')} tone={job.status === 'completed' ? 'success' : job.status === 'failed' ? 'danger' : 'warning'} />
+            <StatusIndicator label={titleCase(job.status || 'unknown')} tone={getJobTone(job.status)} />
           </div>
         </div>
         <div className="metric-card">
@@ -212,8 +277,8 @@ function JobDetailPage({ jobId }) {
           <strong className="metric-value">{Math.round(job.percentage || 0)}%</strong>
         </div>
         <div className="metric-card">
-          <span className="metric-label">Elapsed Time</span>
-          <strong className="metric-value">{job.duration_seconds ? `${job.duration_seconds}s` : formatRelative(job.created_at)}</strong>
+          <span className="metric-label">Duration</span>
+          <strong className="metric-value">{formatJobDuration(job)}</strong>
         </div>
         <div className="metric-card">
           <span className="metric-label">Bytes Processed</span>

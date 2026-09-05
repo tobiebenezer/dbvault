@@ -48,3 +48,51 @@ export function databaseHasBackup(db) {
   const date = new Date(db.last_backup_at);
   return !Number.isNaN(date.getTime()) && date.getFullYear() > 2000;
 }
+
+export function getJobTone(status) {
+  const s = String(status || '').toLowerCase();
+  if (['completed', 'finished', 'succeeded', 'healthy', 'success'].includes(s)) return 'success';
+  if (['failed', 'error', 'dead_letter'].includes(s)) return 'danger';
+  if (['cancelled', 'cancelling'].includes(s)) return 'warning';
+  if (['running', 'in_progress'].includes(s)) return 'primary';
+  return 'neutral';
+}
+
+export function formatDurationSeconds(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  if (m < 60) return remS > 0 ? `${m}m ${remS}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+}
+
+export function formatJobDuration(job) {
+  if (!job) return '—';
+  if (typeof job.duration_seconds === 'number' && job.duration_seconds >= 0) {
+    return formatDurationSeconds(job.duration_seconds);
+  }
+  const start = job.started_at || job.created_at;
+  if (!start) return '—';
+  const startTime = new Date(start).getTime();
+  if (Number.isNaN(startTime) || startTime <= 0) return '—';
+
+  const end = job.completed_at || job.finished_at;
+  if (end) {
+    const endTime = new Date(end).getTime();
+    if (!Number.isNaN(endTime) && endTime >= startTime) {
+      const sec = Math.round((endTime - startTime) / 1000);
+      return formatDurationSeconds(sec);
+    }
+  }
+
+  if (['running', 'queued', 'cancelling'].includes(job.status)) {
+    const elapsedSec = Math.max(0, Math.round((Date.now() - startTime) / 1000));
+    return `${formatDurationSeconds(elapsedSec)} (elapsed)`;
+  }
+
+  return '—';
+}
+

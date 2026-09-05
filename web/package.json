@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prebuild": "test -d node_modules/esbuild || npm ci",
     "build": "node ./scripts/build-web.mjs",
     "test": "node ./scripts/test-web.mjs",
     "dev": "node ./scripts/dev-server.mjs"

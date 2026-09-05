@@ -148,13 +148,16 @@ test-phase7:
 	$(MAKE) test-agent-protocol
 	$(MAKE) test-plugins
 
-.PHONY: build-appliance build-appliance-restricted test-appliance test-phase8 web-build web-test embed-check release-bundle
+.PHONY: build-appliance build-appliance-restricted test-appliance test-phase8 web-install web-build web-test embed-check release-bundle
+
+web-install:
+	cd web && npm ci
 
 web-build:
-	cd web && npm run build
+	cd web && (test -d node_modules/esbuild || npm ci) && npm run build
 
 web-test:
-	cd web && npm test
+	cd web && (test -d node_modules || npm ci) && npm test
 
 embed-check:
 	CGO_ENABLED=0 go test -tags=restricted ./internal/server
