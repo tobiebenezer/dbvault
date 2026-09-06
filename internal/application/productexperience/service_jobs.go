@@ -150,6 +150,8 @@ func (s *Service) CreateJob(jobType, resourceID, resourceName string) domain.Job
 			} else {
 				s.appendLog(view.ID, "info", view.Stage, "Queued on the durable scheduler.")
 			}
+		} else if jobType == "destination_test" {
+			go s.executeLiveDestinationTestAsync(view.ID, resourceID)
 		}
 	}
 
@@ -207,6 +209,131 @@ func decompressGzipIfNeeded(data []byte) ([]byte, error) {
 		return decompressed, nil
 	}
 	return data, nil
+}
+
+// executeLiveDestinationTestAsync drives a destination_test job through its
+// probe/put/get/delete stages against the real storage endpoint, completing or
+// failing the job with the live result.
+func (s *Service) executeLiveDestinationTestAsync(jobID, resourceID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	defer func() {
+		s.mu.Lock()
+		delete(s.activeLiveJobs, jobID)
+		s.mu.Unlock()
+	}()
+
+	s.mu.Lock()
+	cfg, hasCfg := s.customDestinationConfigs[resourceID]
+	destName := ""
+	if dest, exists := s.customDestinations[resourceID]; exists {
+		destName = dest.Name
+	}
+	s.mu.Unlock()
+
+	if !hasCfg {
+		// Fall back to environment-provided storage credentials so
+		// env-configured (non-UI) destinations can still be probed.
+		for _, prefix := range []string{"DBVAULT_R2", "DBVAULT_S3_PRIMARY", "DBVAULT_S3", "R2", "AWS"} {
+			ep := os.Getenv(prefix + "_ENDPOINT")
+			if ep == "" && prefix == "R2" {
+				ep = os.Getenv("R2_ENDPOINT_URL")
+			}
+			if ep == "" {
+				continue
+			}
+			bucket := os.Getenv(prefix + "_BUCKET")
+			if bucket == "" {
+				bucket = os.Getenv(prefix + "_BUCKET_NAME")
+			}
+			if bucket == "" {
+				continue
+			}
+			accessKey := os.Getenv(prefix + "_ACCESS_KEY")
+			if accessKey == "" {
+				accessKey = os.Getenv(prefix + "_ACCESS_KEY_ID")
+			}
+			secretKey := os.Getenv(prefix + "_SECRET_KEY")
+			if secretKey == "" {
+				secretKey = os.Getenv(prefix + "_SECRET_ACCESS_KEY")
+			}
+			region := os.Getenv(prefix + "_REGION")
+			if region == "" {
+				region = "auto"
+			}
+			cfg = StorageDestinationInput{Provider: "r2", Endpoint: ep, Bucket: bucket, AccessKey: accessKey, SecretKey: secretKey, Region: region}
+			hasCfg = true
+			break
+		}
+	}
+
+	if !hasCfg {
+		reason := fmt.Sprintf("No stored configuration found for destination %q. Re-save the destination or set storage environment variables.", resourceID)
+		s.failJob(jobID, "probe", reason)
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+	if destName == "" {
+		destName = cfg.Name
+	}
+	if destName == "" {
+		destName = resourceID
+	}
+
+	s.updateJobStage(jobID, "probe", 15, fmt.Sprintf("Probing %s endpoint %s...", cfg.Provider, strings.TrimSpace(cfg.Endpoint)))
+
+	result, err := s.TestStorageDestination(ctx, cfg)
+	if err != nil {
+		s.failJob(jobID, "probe", fmt.Sprintf("Destination probe failed: %v", err))
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+	if result.Status != "connected" {
+		s.failJob(jobID, "probe", result.ErrorMessage)
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+	s.appendLog(jobID, "info", "probe", fmt.Sprintf("Connected in %dms.", result.LatencyMs))
+
+	if result.PutObject {
+		s.updateJobStage(jobID, "put", 40, "Canary object upload succeeded.")
+	} else {
+		s.failJob(jobID, "put", "Canary object upload failed.")
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+	if result.GetObject && result.ListObjects {
+		s.updateJobStage(jobID, "get", 60, "Canary read-back and bucket listing succeeded.")
+	} else {
+		s.failJob(jobID, "get", "Canary read-back or bucket listing failed.")
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+	if result.DeleteObject {
+		s.updateJobStage(jobID, "delete", 85, "Canary object cleanup succeeded.")
+	} else {
+		s.failJob(jobID, "delete", "Canary object cleanup failed.")
+		s.setDestinationTestStatus(resourceID, "error")
+		return
+	}
+
+	s.updateJobStage(jobID, "complete", 100, fmt.Sprintf("%s storage test passed in %dms: put, get, list and delete all verified.", destName, result.LatencyMs))
+	s.setDestinationTestStatus(resourceID, "healthy")
+}
+
+// setDestinationTestStatus reflects a destination test outcome on the stored
+// destination resource so the console shows the latest probe result.
+func (s *Service) setDestinationTestStatus(resourceID, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dest, exists := s.customDestinations[resourceID]
+	if !exists {
+		return
+	}
+	dest.Status = status
+	dest.LastCheckedAt = s.now()
+	s.customDestinations[resourceID] = dest
+	s.savePersistedDataLocked()
 }
 
 func (s *Service) executeLiveBackupAsync(jobID, resourceID, resourceName string) {

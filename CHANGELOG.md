@@ -2,8 +2,14 @@
 
 All notable changes to DBVault will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.2.1] - 2026-09-06
+
+### Fixed
+- **Storage connection test jobs no longer hang in pending**: `destination_test` jobs queued from the web console in production (live) mode had no worker handler, so R2/S3 connection tests stayed pending forever. Tests now run the real endpoint probe (bucket validation, canary put/get/list/delete), progress through `probe → put → get → delete → complete` stages, and complete or fail with the actual storage error.
+- Destination test outcomes now update the destination's health status (`healthy`/`error`) and last-checked timestamp in the console.
+- Env-configured storage destinations (`DBVAULT_R2_*`, `R2_*`, `AWS_*`) are now probed via the queue when no UI-saved configuration exists.
+
+---
 
 ## [0.2.0] - 2026-09-05
 
