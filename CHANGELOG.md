@@ -2,6 +2,13 @@
 
 All notable changes to DBVault will be documented in this file.
 
+## [0.2.2] - 2026-09-06
+
+### Fixed
+- **PostgreSQL backup failures now explain the fix**: when `pg_dump` fails with `permission denied for table ...`, DBVault no longer surfaces only the raw error. Both live-console backups and core-engine snapshots now run a read-only privilege audit against the database, list every table the backup role cannot SELECT from, and show copy-paste remediation SQL (`GRANT USAGE/SELECT`, `ALTER DEFAULT PRIVILEGES`) with the actual role name. On managed hosting where grants are impossible, the message points to the database's table-exclusion setting instead. Non-permission failures keep the original error message unchanged.
+
+---
+
 ## [0.2.1] - 2026-09-06
 
 ### Fixed

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dbvault/dbvault/internal/domain"
+	"github.com/dbvault/dbvault/internal/pgdiag"
 	"github.com/dbvault/dbvault/internal/ports"
 )
 
@@ -201,6 +202,9 @@ func (d *Driver) CreateBackup(ctx context.Context, req ports.BackupRequest, sink
 				}
 				err = errors.New(errMsg)
 			}
+			if hint := d.permissionHint(ctx, stderr.String()); hint != "" {
+				err = errors.New(hint)
+			}
 			return set, domain.NewError(domain.ErrDumpFailed, "postgres dump failed", err)
 		}
 		stored, err := w.Commit(ctx, domain.ArtifactCommitMetadata{Metadata: map[string]string{"tool": cmd[0]}})
@@ -212,6 +216,23 @@ func (d *Driver) CreateBackup(ctx context.Context, req ports.BackupRequest, sink
 	}
 	set.CompletedAt = d.now()
 	return set, nil
+}
+
+// permissionHint converts raw pg_dump permission failures into actionable,
+// role-aware remediation guidance. It returns "" for non-privilege failures
+// so normal error reporting stays untouched.
+func (d *Driver) permissionHint(ctx context.Context, stderr string) string {
+	if !pgdiag.IsPermissionDenied(stderr) {
+		return ""
+	}
+	pwd, _ := d.password()
+	return pgdiag.Hint(ctx, stderr, pgdiag.Connection{
+		Host:     d.Config.Host,
+		Port:     d.Config.Port,
+		User:     d.Config.Username,
+		Database: d.Config.Database,
+		Password: pwd,
+	})
 }
 
 func (d *Driver) VerifyBackup(ctx context.Context, req ports.BackupVerificationRequest) (domain.VerificationResult, error) {

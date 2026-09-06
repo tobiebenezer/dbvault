@@ -22,6 +22,7 @@ import (
 	s3adapter "github.com/dbvault/dbvault/internal/adapters/storage/s3"
 	"github.com/dbvault/dbvault/internal/application/scheduler"
 	"github.com/dbvault/dbvault/internal/domain"
+	"github.com/dbvault/dbvault/internal/pgdiag"
 	"github.com/dbvault/dbvault/internal/ports"
 )
 
@@ -528,7 +529,11 @@ func (s *Service) executeLiveBackupAsync(jobID, resourceID, resourceName string)
 		out, err := cmd.Output()
 		if err != nil {
 			errDetail := strings.TrimSpace(stderr.String())
-			s.failJob(jobID, "snapshot", fmt.Sprintf("pg_dump failed for database '%s': %v %s", dbName, err, errDetail))
+			msg := fmt.Sprintf("pg_dump failed for database '%s': %v %s", dbName, err, errDetail)
+			if hint := pgdiag.Hint(ctx, errDetail, pgdiag.Connection{Host: host, Port: port, User: user, Database: dbName, Password: pass}); hint != "" {
+				msg = hint
+			}
+			s.failJob(jobID, "snapshot", msg)
 			return
 		}
 		if len(out) == 0 {
@@ -1964,4 +1969,3 @@ func (s *Service) evaluateDueSchedules() {
 		s.CreateJob("backup", sc.SourceID, sc.Name)
 	}
 }
-
