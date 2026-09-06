@@ -494,6 +494,8 @@ export function DatabaseDetailPage({ dbId }) {
 function DatabaseSchemaExplorer({ dbId }) {
   const [schema, setSchema] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [elevation, setElevation] = useState(null);
+  const [elevationSaving, setElevationSaving] = useState(false);
 
   const loadSchema = () => {
     setLoading(true);
@@ -503,6 +505,9 @@ function DatabaseSchemaExplorer({ dbId }) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
+    API.getDatabaseElevation(dbId)
+      .then((cfg) => setElevation(cfg))
+      .catch(() => setElevation({ enabled: false, username: '', has_password: false }));
   };
 
   useEffect(() => {
@@ -521,6 +526,28 @@ function DatabaseSchemaExplorer({ dbId }) {
       loadSchema();
     } catch (err) {
       Store.toast(err.message, 'danger');
+    }
+  };
+
+  const handleSaveElevation = async () => {
+    if (!elevation) return;
+    if (elevation.enabled && !elevation.username.trim()) {
+      Store.toast('Elevation username is required when enabled', 'danger');
+      return;
+    }
+    setElevationSaving(true);
+    try {
+      await API.setDatabaseElevation(dbId, {
+        enabled: elevation.enabled,
+        username: elevation.username.trim(),
+        password: elevation.password || '',
+      });
+      Store.toast(elevation.enabled ? 'Privilege elevation enabled — backups will auto-grant and auto-revoke on permission errors' : 'Privilege elevation disabled', 'success');
+      setElevation((e) => ({ ...e, has_password: !!(e.password && e.password.length) || e.has_password, password: '' }));
+    } catch (err) {
+      Store.toast(err.message || 'Failed to save elevation config', 'danger');
+    } finally {
+      setElevationSaving(false);
     }
   };
 
@@ -604,6 +631,58 @@ function DatabaseSchemaExplorer({ dbId }) {
         ))}
       </DataTable>
     </Card>
+
+      <Card
+        title="Privilege Elevation (optional · PostgreSQL)"
+        subtitle="When pg_dump fails with permission errors, DBVault can temporarily grant the backup role read access via a privileged role, retry the backup, and always revoke the grants afterwards."
+      >
+        {elevation ? (
+          <div className="stack-md">
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={elevation.enabled}
+                onChange={(e) => setElevation({ ...elevation, enabled: e.target.checked })}
+              />
+              <span className="text-sm">Enable automatic privilege elevation for this database</span>
+            </label>
+            {elevation.enabled && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div className="form-field">
+                  <label>Elevation Role</label>
+                  <input
+                    type="text"
+                    className="form-input cell-mono"
+                    value={elevation.username || ''}
+                    onInput={(e) => setElevation({ ...elevation, username: e.currentTarget.value })}
+                    placeholder="e.g. postgres or the table owner"
+                  />
+                </div>
+                <div className="form-field">
+                  <label>{elevation.has_password ? 'Password (stored — leave blank to keep)' : 'Password'}</label>
+                  <input
+                    type="password"
+                    className="form-input cell-mono"
+                    value={elevation.password || ''}
+                    onInput={(e) => setElevation({ ...elevation, password: e.currentTarget.value })}
+                    placeholder={elevation.has_password ? '••••••••' : 'Elevation role password'}
+                  />
+                </div>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <Button
+                label={elevationSaving ? 'Saving…' : 'Save Elevation'}
+                onClick={handleSaveElevation}
+                tone="secondary compact"
+                disabled={elevationSaving}
+              />
+            </div>
+          </div>
+        ) : (
+          <LoadingState label="Loading elevation config…" />
+        )}
+      </Card>
     </div>
   );
 }

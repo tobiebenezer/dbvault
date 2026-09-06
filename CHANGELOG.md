@@ -2,6 +2,14 @@
 
 All notable changes to DBVault will be documented in this file.
 
+## [0.2.3] - 2026-09-06
+
+### Added
+- **Autonomous privilege elevation for PostgreSQL backups (opt-in)**: databases can now configure a separate "elevation role" in the console (Databases → database → Tables & Storage Footprint → Privilege Elevation). When `pg_dump` fails with `permission denied for table/sequence/schema ...` and elevation is enabled, DBVault autonomously grants the backup role read access via the elevation role, retries the dump once, and **always revokes the grants afterwards** — including when the dump fails again, with 3 revoke retries and a loud security log if revocation cannot be confirmed. The denied-object list comes from a full privilege audit (tables + sequences + schemas, not just the parsed error); identifiers are sanitized (only plain, unquoted names are granted) and the elevation role must differ from the backup role. Without elevation configured, the manual remediation hint from 0.2.2 still applies.
+- Elevation config is stored per database in `custom_elevation.json` (0600, alongside other secrets) with a dedicated API (`GET`/`POST /api/v1/databases/{id}/elevation`; the GET never returns the stored password, and a blank password on re-save keeps the stored one).
+
+---
+
 ## [0.2.2] - 2026-09-06
 
 ### Fixed

@@ -170,6 +170,8 @@ export const API = (() => {
     // Database schema & table exclusions
     databaseSchema: (id) => sourceIdOrParam(id),
     setTableExclusions: (sourceId, tables) => request('/api/v1/databases/schema/exclusions', { method: 'POST', body: JSON.stringify({ source_id: sourceId, tables }) }),
+    getDatabaseElevation: (dbId) => request(`/api/v1/databases/${encodeURIComponent(dbId)}/elevation`),
+    setDatabaseElevation: (dbId, cfg) => request(`/api/v1/databases/${encodeURIComponent(dbId)}/elevation`, { method: 'POST', body: JSON.stringify(cfg) }),
     maskingRules: () => request('/api/v1/privacy/masking-rules'),
     powerBICatalog: () => request('/api/v1/bi/powerbi/catalog'),
     // Destination management & live testing

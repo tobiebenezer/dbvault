@@ -1326,6 +1326,49 @@ func (s *Service) SetTableExclusions(sourceID string, tables []string) {
 	s.savePersistedDataLocked()
 }
 
+// SetDatabaseElevation configures opt-in automatic privilege elevation for a
+// database: when pg_dump fails with permission errors, DBVault temporarily
+// grants the backup role read access via the elevation role, retries the
+// dump, and revokes the grants afterwards.
+func (s *Service) SetDatabaseElevation(resourceID string, cfg domain.DatabaseElevation) error {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return fmt.Errorf("database id is required")
+	}
+	if cfg.Enabled && strings.TrimSpace(cfg.Username) == "" {
+		return fmt.Errorf("elevation username is required when enabled")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Keep a previously stored password when the console re-saves the config
+	// without one (the console never receives stored passwords back).
+	if cfg.Password == "" {
+		if prev, ok := s.elevationConfigs[resourceID]; ok && prev.Username == cfg.Username {
+			cfg.Password = prev.Password
+		}
+	}
+	s.elevationConfigs[resourceID] = cfg
+	s.savePersistedDataLocked()
+	return nil
+}
+
+// DatabaseElevationView is the elevation config as exposed to the console.
+// The stored password is intentionally omitted.
+type DatabaseElevationView struct {
+	Enabled     bool   `json:"enabled"`
+	Username    string `json:"username,omitempty"`
+	HasPassword bool   `json:"has_password"`
+}
+
+// DatabaseElevation returns the current elevation configuration for a
+// database without exposing the stored password.
+func (s *Service) DatabaseElevation(resourceID string) DatabaseElevationView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg := s.elevationConfigs[strings.TrimSpace(resourceID)]
+	return DatabaseElevationView{Enabled: cfg.Enabled, Username: cfg.Username, HasPassword: cfg.Password != ""}
+}
+
 // DatabaseSchema returns table sizes, storage distribution, and exclusion flags by querying the real database engine.
 func (s *Service) DatabaseSchema(dbID string) DatabaseSchemaView {
 	s.mu.Lock()

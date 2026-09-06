@@ -1312,6 +1312,17 @@ func (a *Appliance) databaseByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := parts[0]
+	if len(parts) == 2 && parts[1] == "elevation" {
+		switch r.Method {
+		case http.MethodGet:
+			a.databaseElevationGet(w, r, id)
+		case http.MethodPost:
+			a.databaseElevationConfig(w, r, id)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+		return
+	}
 	if len(parts) == 2 && parts[1] == "export-sql" && r.Method == http.MethodGet {
 		data, filename, err := a.px.ExportDecryptedSQL(r.Context(), id)
 		if err != nil {
@@ -1333,6 +1344,25 @@ func (a *Appliance) databaseByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// databaseElevationGet returns the elevation config without the password.
+func (a *Appliance) databaseElevationGet(w http.ResponseWriter, r *http.Request, dbID string) {
+	writeJSON(w, http.StatusOK, a.px.DatabaseElevation(dbID))
+}
+
+// databaseElevationConfig stores the elevation config for a database.
+func (a *Appliance) databaseElevationConfig(w http.ResponseWriter, r *http.Request, dbID string) {
+	var cfg domain.DatabaseElevation
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := a.px.SetDatabaseElevation(dbID, cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (a *Appliance) databaseExportSQL(w http.ResponseWriter, r *http.Request) {

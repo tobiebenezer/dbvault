@@ -207,6 +207,17 @@ type DatabaseResource struct {
 	ConnectionURI  string           `json:"connection_uri,omitempty"`
 }
 
+// DatabaseElevation configures the opt-in privilege elevation used when
+// pg_dump fails with permission errors: DBVault temporarily grants the backup
+// role read access via a privileged elevation role, retries the dump, and
+// revokes the grants afterwards. The elevation role must differ from the
+// backup role and needs the right to grant on the affected objects.
+type DatabaseElevation struct {
+	Enabled  bool   `json:"enabled"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
 type RepositoryResource struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`

@@ -44,6 +44,7 @@ type Service struct {
 	channels                 map[string]NotificationChannel
 	immutability             ImmutabilityPolicy
 	tableExclusions          map[string][]string
+	elevationConfigs         map[string]domain.DatabaseElevation
 	customDatabases          map[string]domain.DatabaseResource
 	customDestinations       map[string]domain.DestinationResource
 	customDestinationConfigs map[string]StorageDestinationInput
@@ -80,6 +81,7 @@ func NewWithDemo(root string, demo bool) (*Service, error) {
 		schedules:                map[string]BackupSchedule{},
 		channels:                 map[string]NotificationChannel{},
 		tableExclusions:          map[string][]string{},
+		elevationConfigs:         map[string]domain.DatabaseElevation{},
 		customDatabases:          map[string]domain.DatabaseResource{},
 		customDestinations:       map[string]domain.DestinationResource{},
 		customDestinationConfigs: map[string]StorageDestinationInput{},
@@ -1205,6 +1207,13 @@ func (s *Service) loadPersistedDataLocked() {
 			s.tableExclusions = excls
 		}
 	}
+	elevPath := filepath.Join(s.root, "custom_elevation.json")
+	if b, err := os.ReadFile(elevPath); err == nil {
+		var cfgs map[string]domain.DatabaseElevation
+		if json.Unmarshal(b, &cfgs) == nil && len(cfgs) > 0 {
+			s.elevationConfigs = cfgs
+		}
+	}
 	biPath := filepath.Join(s.root, "bi_connections.json")
 	if b, err := os.ReadFile(biPath); err == nil {
 		var connections map[string]BIConnection
@@ -1242,6 +1251,11 @@ func (s *Service) savePersistedDataLocked() {
 	if s.tableExclusions != nil {
 		if b, err := json.MarshalIndent(s.tableExclusions, "", "  "); err == nil {
 			_ = writeFileAtomic(filepath.Join(s.root, "custom_exclusions.json"), b, 0600)
+		}
+	}
+	if s.elevationConfigs != nil {
+		if b, err := json.MarshalIndent(s.elevationConfigs, "", "  "); err == nil {
+			_ = writeFileAtomic(filepath.Join(s.root, "custom_elevation.json"), b, 0600)
 		}
 	}
 	if s.biConnections != nil {
