@@ -529,8 +529,11 @@ func (s *Service) executeLiveBackupAsync(jobID, resourceID, resourceName string)
 		out, err := cmd.Output()
 		if err != nil {
 			errDetail := strings.TrimSpace(stderr.String())
+			var elevErr error
 			if pgdiag.IsPermissionDenied(errDetail) {
-				if retried, elevErr := s.dumpWithPrivilegeElevation(ctx, jobID, resourceID, host, port, user, dbName, pass, args, errDetail); elevErr == nil {
+				var retried []byte
+				retried, elevErr = s.dumpWithPrivilegeElevation(ctx, jobID, resourceID, host, port, user, dbName, pass, args, errDetail, targetDb)
+				if elevErr == nil {
 					out = retried
 					err = nil
 					s.appendLog(jobID, "info", "snapshot", fmt.Sprintf("Captured full live PostgreSQL snapshot after privilege elevation (%d bytes)", len(out)))
@@ -540,6 +543,9 @@ func (s *Service) executeLiveBackupAsync(jobID, resourceID, resourceName string)
 				msg := fmt.Sprintf("pg_dump failed for database '%s': %v %s", dbName, err, errDetail)
 				if hint := pgdiag.Hint(ctx, errDetail, pgdiag.Connection{Host: host, Port: port, User: user, Database: dbName, Password: pass}); hint != "" {
 					msg = hint
+				}
+				if elevErr != nil {
+					msg += fmt.Sprintf("\n\n(Note: Automatic privilege elevation was attempted but failed: %v)", elevErr)
 				}
 				s.failJob(jobID, "snapshot", msg)
 				return
@@ -870,10 +876,26 @@ func (s *Service) resolveMySQLParams() (host string, port int, user, pass string
 // dumpWithPrivilegeElevation retries a permission-denied pg_dump after
 // temporarily granting the backup role read access via a separately
 // configured elevation role. Grants are revoked before the function returns,
-// regardless of the dump outcome. Returns the dump bytes on success.
-func (s *Service) dumpWithPrivilegeElevation(ctx context.Context, jobID, resourceID, host string, port int, backupUser, dbName, pass string, args []string, stderrDetail string) ([]byte, error) {
+// regardless of the dump outcome, using a detached context to ensure revocation
+// executes even if the dump context timed out or was cancelled.
+func (s *Service) dumpWithPrivilegeElevation(ctx context.Context, jobID, resourceID, host string, port int, backupUser, dbName, pass string, args []string, stderrDetail string, targetDb *domain.DatabaseResource) ([]byte, error) {
 	s.mu.Lock()
 	cfg, configured := s.elevationConfigs[resourceID]
+	if !configured && targetDb != nil {
+		if c, ok := s.elevationConfigs[targetDb.ID]; ok {
+			cfg = c
+			configured = true
+		} else if c, ok := s.elevationConfigs[targetDb.Name]; ok {
+			cfg = c
+			configured = true
+		}
+	}
+	if !configured && dbName != "" {
+		if c, ok := s.elevationConfigs[dbName]; ok {
+			cfg = c
+			configured = true
+		}
+	}
 	s.mu.Unlock()
 	if !configured || !cfg.Enabled || strings.TrimSpace(cfg.Username) == "" {
 		return nil, fmt.Errorf("privilege elevation is not enabled for this database")
@@ -898,18 +920,20 @@ func (s *Service) dumpWithPrivilegeElevation(ctx context.Context, jobID, resourc
 	}
 	s.appendLog(jobID, "info", "snapshot", fmt.Sprintf("Granted read privileges on %d object(s) to %q — retrying pg_dump", len(granted), backupUser))
 
-	dumpOut, dumpErr := retryLiveDump(ctx, args, pass)
+	defer func() {
+		// Use a detached context with an independent timeout so that revocation
+		// is guaranteed to execute even if the dump context timed out or was cancelled.
+		revokeCtx, revokeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer revokeCancel()
+		revokeErr := s.revokeElevatedPrivileges(revokeCtx, jobID, host, port, cfg, dbName, backupUser, objects)
+		if revokeErr != nil {
+			s.appendLog(jobID, "error", "snapshot", "SECURITY: elevated privileges could not be revoked automatically — revoke them manually: "+strings.ReplaceAll(revokeErr.Error(), "\n", " "))
+		} else {
+			s.appendLog(jobID, "info", "snapshot", "Revoked elevated privileges — database state restored")
+		}
+	}()
 
-	revokeErr := s.revokeElevatedPrivileges(ctx, jobID, host, port, cfg, dbName, backupUser, objects)
-	if revokeErr != nil {
-		s.appendLog(jobID, "error", "snapshot", "SECURITY: elevated privileges could not be revoked automatically — revoke them manually: "+strings.ReplaceAll(revokeErr.Error(), "\n", " "))
-	} else {
-		s.appendLog(jobID, "info", "snapshot", "Revoked elevated privileges — database state restored")
-	}
-	if dumpErr != nil {
-		return nil, dumpErr
-	}
-	return dumpOut, nil
+	return retryLiveDump(ctx, args, pass)
 }
 
 // retryLiveDump re-runs pg_dump with the same arguments after elevation.

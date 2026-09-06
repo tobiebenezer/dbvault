@@ -43,15 +43,11 @@ func (o DeniedObjects) Count() int {
 	return len(o.Tables) + len(o.Sequences) + len(o.Schemas)
 }
 
-// deniedTablePattern matches pg_dump errors such as
-// "permission denied for table migrations" or
-// "permission denied for table public.migrations".
-var deniedTablePattern = regexp.MustCompile(`(?i)permission denied for (?:table )?([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|"[^"]+"(?:\."[^"]+")?)`)
+// deniedObjectPattern matches pg_dump / PostgreSQL error messages for tables,
+// sequences, schemas, views, and relations.
+var deniedObjectPattern = regexp.MustCompile(`(?i)permission denied for (?:(table|sequence|schema|relation|view|materialized view)\s+)?([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|"[^"]+"(?:\."[^"]+")?)`)
 
-// deniedObjectPattern is kind-aware and also matches sequences and schemas.
-var deniedObjectPattern = regexp.MustCompile(`(?i)permission denied for (table |sequence |schema )?([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?|"[^"]+"(?:\."[^"]+")?)`)
-
-// plainIdent matches a single safe PostgreSQL identifier without quoting.
+// plainIdent matches an unquoted safe identifier.
 var plainIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
 
 // runPsql executes psql with the given connection and query. Replaceable in tests.
@@ -66,26 +62,16 @@ var Audit = func(ctx context.Context, conn Connection) (string, error) {
 }
 
 // IsPermissionDenied reports whether pg_dump/pg_restore stderr indicates a
-// permission failure on a table, sequence, or schema.
+// permission failure on a table, sequence, schema, view, or relation.
 func IsPermissionDenied(stderr string) bool {
 	return deniedObjectPattern.MatchString(stderr)
 }
 
-// DeniedTables extracts the distinct table names mentioned in permission
-// errors found in stderr.
+// DeniedTables extracts the distinct table/view/relation names mentioned in
+// permission errors found in stderr.
 func DeniedTables(stderr string) []string {
-	matches := deniedTablePattern.FindAllStringSubmatch(stderr, -1)
-	seen := map[string]bool{}
-	out := []string{}
-	for _, m := range matches {
-		t := strings.TrimSpace(m[1])
-		if t == "" || seen[t] {
-			continue
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	return out
+	obj := DeniedObjectsFrom(stderr)
+	return obj.Tables
 }
 
 // DeniedObjectsFrom parses permission-denied stderr into objects grouped by
@@ -95,7 +81,7 @@ func DeniedObjectsFrom(stderr string) DeniedObjects {
 	seen := map[string]bool{}
 	for _, m := range deniedObjectPattern.FindAllStringSubmatch(stderr, -1) {
 		name := strings.TrimSpace(m[2])
-		kind := strings.TrimSpace(m[1])
+		kind := strings.ToLower(strings.TrimSpace(m[1]))
 		key := kind + "|" + name
 		if name == "" || seen[key] {
 			continue
@@ -107,6 +93,7 @@ func DeniedObjectsFrom(stderr string) DeniedObjects {
 		case "schema":
 			out.Schemas = append(out.Schemas, name)
 		default:
+			// "table", "relation", "view", "materialized view", or bare identifier
 			out.Tables = append(out.Tables, name)
 		}
 	}
@@ -117,13 +104,13 @@ func DeniedObjectsFrom(stderr string) DeniedObjects {
 // every table and sequence in the public schema, plus default privileges for
 // future tables.
 func RemediationSQL(role string) string {
-	role = roleForSQL(role)
-	return "GRANT USAGE ON SCHEMA public TO " + role + ";\n" +
-		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO " + role + ";\n" +
-		"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO " + role + ";\n" +
+	roleTarget := roleForSQL(role)
+	return "GRANT USAGE ON SCHEMA public TO " + roleTarget + ";\n" +
+		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO " + roleTarget + ";\n" +
+		"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO " + roleTarget + ";\n" +
 		"-- future tables: run as the role that owns/creates the tables\n" +
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO " + role + ";\n" +
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO " + role + ";"
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO " + roleTarget + ";\n" +
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO " + roleTarget + ";"
 }
 
 // Hint converts pg_dump stderr into a diagnostic message with the complete
@@ -156,9 +143,9 @@ func Hint(ctx context.Context, stderr string, conn Connection) string {
 	return b.String()
 }
 
-const auditTablesQuery = `SELECT string_agg(quote_ident(schemaname) || '.' || quote_ident(tablename), ', ' ORDER BY schemaname, tablename) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND NOT has_table_privilege(current_user, quote_ident(schemaname) || '.' || quote_ident(tablename), 'SELECT')`
+const auditTablesQuery = `SELECT string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.relname), ', ' ORDER BY n.nspname, c.relname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'm') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND NOT has_table_privilege(current_user, c.oid, 'SELECT')`
 
-const auditSequencesQuery = `SELECT string_agg(quote_ident(schemaname) || '.' || quote_ident(sequencename), ', ' ORDER BY schemaname, sequencename) FROM pg_catalog.pg_sequences WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND NOT (has_sequence_privilege(current_user, quote_ident(schemaname) || '.' || quote_ident(sequencename), 'USAGE') OR has_sequence_privilege(current_user, quote_ident(schemaname) || '.' || quote_ident(sequencename), 'SELECT'))`
+const auditSequencesQuery = `SELECT string_agg(quote_ident(n.nspname) || '.' || quote_ident(c.relname), ', ' ORDER BY n.nspname, c.relname) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'S' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND NOT (has_sequence_privilege(current_user, c.oid, 'USAGE') OR has_sequence_privilege(current_user, c.oid, 'SELECT'))`
 
 const auditSchemasQuery = `SELECT string_agg(quote_ident(nspname), ', ' ORDER BY nspname) FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') AND NOT has_schema_privilege(current_user, quote_ident(nspname), 'USAGE')`
 
@@ -186,9 +173,8 @@ func AuditObjects(ctx context.Context, conn Connection) (DeniedObjects, error) {
 }
 
 // Elevate grants the backup role (grantee) read privileges on the denied
-// objects using the elevation connection. Only plain, unquoted identifiers
-// are elevated — anything else is skipped for safety. It returns the list of
-// object identifiers that were granted.
+// objects using the elevation connection. Identifiers are safely validated
+// and quoted. It returns the list of object identifiers that were granted.
 func Elevate(ctx context.Context, elevConn Connection, grantee string, obj DeniedObjects) ([]string, error) {
 	grantee = strings.TrimSpace(grantee)
 	if grantee == "" {
@@ -199,7 +185,7 @@ func Elevate(ctx context.Context, elevConn Connection, grantee string, obj Denie
 	}
 	stmts, granted := elevationStatements(obj, grantee, true)
 	if len(stmts) == 0 {
-		return nil, fmt.Errorf("no grantable objects (only plain identifiers are elevated)")
+		return nil, fmt.Errorf("no grantable objects (only valid identifiers are elevated)")
 	}
 	if _, err := runPsql(ctx, elevConn, strings.Join(stmts, ";\n")+";"); err != nil {
 		return nil, err
@@ -228,6 +214,20 @@ func Revoke(ctx context.Context, elevConn Connection, grantee string, obj Denied
 func elevationStatements(obj DeniedObjects, grantee string, grant bool) ([]string, []string) {
 	role := pgQuoteIdent(grantee)
 	var out []stmtAndID
+
+	// 1. On grant, schemas must be granted USAGE before tables/sequences can be accessed
+	if grant {
+		for _, schema := range obj.Schemas {
+			clean := cleanIdentPart(schema)
+			if clean == "" {
+				continue
+			}
+			q := pgQuoteIdent(clean)
+			out = append(out, stmtAndID{q, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", q, role)})
+		}
+	}
+
+	// 2. Tables, views, and relations
 	for _, t := range obj.Tables {
 		q := sanitizeQualified(t)
 		if q == "" {
@@ -239,6 +239,8 @@ func elevationStatements(obj DeniedObjects, grantee string, grant bool) ([]strin
 			out = append(out, stmtAndID{q, fmt.Sprintf("REVOKE SELECT ON %s FROM %s", q, role)})
 		}
 	}
+
+	// 3. Sequences
 	for _, seq := range obj.Sequences {
 		q := sanitizeQualified(seq)
 		if q == "" {
@@ -250,16 +252,19 @@ func elevationStatements(obj DeniedObjects, grantee string, grant bool) ([]strin
 			out = append(out, stmtAndID{q, fmt.Sprintf("REVOKE USAGE, SELECT ON %s FROM %s", q, role)})
 		}
 	}
-	for _, schema := range obj.Schemas {
-		if !plainIdent.MatchString(schema) {
-			continue
-		}
-		if grant {
-			out = append(out, stmtAndID{schema, fmt.Sprintf("GRANT USAGE ON %s TO %s", schema, role)})
-		} else {
-			out = append(out, stmtAndID{schema, fmt.Sprintf("REVOKE USAGE ON %s FROM %s", schema, role)})
+
+	// 4. On revoke, schemas are revoked last after child objects have been revoked
+	if !grant {
+		for _, schema := range obj.Schemas {
+			clean := cleanIdentPart(schema)
+			if clean == "" {
+				continue
+			}
+			q := pgQuoteIdent(clean)
+			out = append(out, stmtAndID{q, fmt.Sprintf("REVOKE USAGE ON SCHEMA %s FROM %s", q, role)})
 		}
 	}
+
 	stmts := make([]string, 0, len(out))
 	ids := make([]string, 0, len(out))
 	for _, s := range out {
@@ -274,20 +279,72 @@ type stmtAndID struct {
 	stmt string
 }
 
-// sanitizeQualified accepts only plain, unquoted (optionally schema-qualified)
-// identifiers and rejects anything else to keep generated SQL injection-safe.
+// sanitizeQualified accepts plain or quoted (optionally schema-qualified)
+// identifiers and safely re-quotes each component for injection-safe SQL.
 func sanitizeQualified(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return ""
 	}
-	parts := strings.Split(name, ".")
-	for _, p := range parts {
-		if !plainIdent.MatchString(p) {
+	parts := splitQualifiedIdent(name)
+	if len(parts) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		clean := cleanIdentPart(p)
+		if clean == "" {
+			return ""
+		}
+		quoted[i] = pgQuoteIdent(clean)
+	}
+	return strings.Join(quoted, ".")
+}
+
+// splitQualifiedIdent splits an identifier by '.' while respecting quoted parts.
+func splitQualifiedIdent(name string) []string {
+	var parts []string
+	var cur strings.Builder
+	inQuote := false
+	runes := []rune(name)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '"' {
+			inQuote = !inQuote
+			cur.WriteRune(r)
+		} else if r == '.' && !inQuote {
+			parts = append(parts, cur.String())
+			cur.Reset()
+		} else {
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		parts = append(parts, cur.String())
+	}
+	return parts
+}
+
+// cleanIdentPart strips matching surrounding double quotes and unescapes internal
+// quotes ("" -> "), validating that the identifier contains no null bytes or control characters.
+func cleanIdentPart(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	for _, r := range p {
+		if r == 0 || r < 32 {
 			return ""
 		}
 	}
-	return strings.Join(parts, ".")
+	if strings.HasPrefix(p, `"`) && strings.HasSuffix(p, `"`) && len(p) >= 2 {
+		inner := p[1 : len(p)-1]
+		return strings.ReplaceAll(inner, `""`, `"`)
+	}
+	if plainIdent.MatchString(p) {
+		return p
+	}
+	return ""
 }
 
 // pgQuoteIdent double-quotes a role name for safe use in generated SQL.
@@ -347,10 +404,14 @@ func splitAuditList(rows string) []string {
 }
 
 func roleForSQL(role string) string {
-	if strings.TrimSpace(role) == "" {
+	r := strings.TrimSpace(role)
+	if r == "" {
 		return "<dbvault_role>"
 	}
-	return role
+	if r == "<dbvault_role>" {
+		return r
+	}
+	return pgQuoteIdent(r)
 }
 
 func roleForLabel(role string) string {

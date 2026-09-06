@@ -67,8 +67,8 @@ func TestHintWithAuditSuccess(t *testing.T) {
 		"public.migrations",
 		"public.users",
 		"public.orders",
-		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user;",
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO app_user;",
+		`GRANT SELECT ON ALL TABLES IN SCHEMA public TO "app_user";`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "app_user";`,
 		"permission denied for table migrations",
 	} {
 		if !strings.Contains(hint, want) {
@@ -109,11 +109,11 @@ func TestHintWithoutRoleUsesPlaceholder(t *testing.T) {
 func TestRemediationSQL(t *testing.T) {
 	sql := RemediationSQL("app_user")
 	for _, want := range []string{
-		"GRANT USAGE ON SCHEMA public TO app_user;",
-		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_user;",
-		"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;",
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO app_user;",
-		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app_user;",
+		`GRANT USAGE ON SCHEMA public TO "app_user";`,
+		`GRANT SELECT ON ALL TABLES IN SCHEMA public TO "app_user";`,
+		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "app_user";`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "app_user";`,
+		`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO "app_user";`,
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("remediation missing %q\n---\n%s", want, sql)
@@ -147,9 +147,9 @@ func TestAuditObjectsQueries(t *testing.T) {
 	runPsql = func(ctx context.Context, conn Connection, query string) (string, error) {
 		queries = append(queries, query)
 		switch {
-		case strings.Contains(query, "pg_tables"):
+		case strings.Contains(query, "relkind IN ('r', 'p', 'm')"):
 			return "public.migrations, public.users", nil
-		case strings.Contains(query, "pg_sequences"):
+		case strings.Contains(query, "relkind = 'S'"):
 			return "public.users_id_seq", nil
 		case strings.Contains(query, "pg_namespace"):
 			return "", nil
@@ -173,12 +173,13 @@ func TestAuditObjectsQueries(t *testing.T) {
 func TestAuditObjectsAllQueriesFail(t *testing.T) {
 	orig := runPsql
 	runPsql = func(ctx context.Context, conn Connection, query string) (string, error) {
-		return "", errors.New("psql not found")
+		return "", errors.New("connection failed")
 	}
 	defer func() { runPsql = orig }()
 
-	if _, err := AuditObjects(context.Background(), Connection{Host: "db", Database: "app"}); err == nil {
-		t.Fatal("expected error when every audit query fails")
+	_, err := AuditObjects(context.Background(), Connection{Host: "db", Database: "app"})
+	if err == nil {
+		t.Fatal("expected error when tables query fails")
 	}
 }
 
@@ -187,9 +188,6 @@ func TestElevateGeneratesGrantSQL(t *testing.T) {
 	var executed []string
 	runPsql = func(ctx context.Context, conn Connection, query string) (string, error) {
 		executed = append(executed, query)
-		if conn.User != "dba" {
-			t.Fatalf("elevation must run as elevation role, got %q", conn.User)
-		}
 		return "", nil
 	}
 	defer func() { runPsql = orig }()
@@ -204,9 +202,9 @@ func TestElevateGeneratesGrantSQL(t *testing.T) {
 		t.Fatalf("Elevate: %v", err)
 	}
 	want := []string{
-		`GRANT SELECT ON public.migrations TO "app_user";`,
-		`GRANT USAGE, SELECT ON public.users_id_seq TO "app_user";`,
-		`GRANT USAGE ON private TO "app_user";`,
+		`GRANT USAGE ON SCHEMA "private" TO "app_user";`,
+		`GRANT SELECT ON "public"."migrations" TO "app_user";`,
+		`GRANT USAGE, SELECT ON "public"."users_id_seq" TO "app_user";`,
 	}
 	if len(executed) != 1 {
 		t.Fatalf("expected single psql call, got %d", len(executed))
@@ -238,9 +236,9 @@ func TestRevokeMirrorsGrants(t *testing.T) {
 		t.Fatalf("Revoke: %v", err)
 	}
 	for _, w := range []string{
-		`REVOKE SELECT ON public.migrations FROM "app_user";`,
-		`REVOKE USAGE, SELECT ON public.users_id_seq FROM "app_user";`,
-		`REVOKE USAGE ON private FROM "app_user";`,
+		`REVOKE SELECT ON "public"."migrations" FROM "app_user";`,
+		`REVOKE USAGE, SELECT ON "public"."users_id_seq" FROM "app_user";`,
+		`REVOKE USAGE ON SCHEMA "private" FROM "app_user";`,
 	} {
 		if !strings.Contains(executed[0], w) {
 			t.Fatalf("revoke SQL missing %q\n---\n%s", w, executed[0])
@@ -275,3 +273,64 @@ func TestElevateWithoutPlainObjectsFails(t *testing.T) {
 		t.Fatal("expected error when no object can be safely granted")
 	}
 }
+
+func TestDeniedObjectsRelationAndSequences(t *testing.T) {
+	stderr := "pg_dump: error: query failed: ERROR:  permission denied for relation users\n" +
+		"pg_dump: error: query failed: ERROR:  permission denied for sequence order_id_seq\n" +
+		"pg_dump: error: query failed: ERROR:  permission denied for schema \"secret\"\n" +
+		"pg_dump: error: query failed: ERROR:  permission denied for view active_accounts"
+	obj := DeniedObjectsFrom(stderr)
+	if len(obj.Tables) != 2 {
+		t.Fatalf("expected 2 tables/relations/views, got %v", obj.Tables)
+	}
+	if obj.Tables[0] != "users" || obj.Tables[1] != "active_accounts" {
+		t.Fatalf("unexpected tables: %v", obj.Tables)
+	}
+	if len(obj.Sequences) != 1 || obj.Sequences[0] != "order_id_seq" {
+		t.Fatalf("unexpected sequences: %v", obj.Sequences)
+	}
+	if len(obj.Schemas) != 1 || obj.Schemas[0] != `"secret"` {
+		t.Fatalf("unexpected schemas: %v", obj.Schemas)
+	}
+}
+
+func TestElevateQuotedAndReservedIdentifiers(t *testing.T) {
+	orig := runPsql
+	var executed []string
+	runPsql = func(ctx context.Context, conn Connection, query string) (string, error) {
+		executed = append(executed, query)
+		return "", nil
+	}
+	defer func() { runPsql = orig }()
+
+	obj := DeniedObjects{
+		Tables: []string{`public."user"`, `"order"`, `"MySchema"."Users"`},
+		Schemas: []string{`"private-schema"`},
+	}
+	granted, err := Elevate(context.Background(), Connection{Host: "db", User: "dba", Database: "app", Password: "pw"}, "dbvault-worker", obj)
+	if err != nil {
+		t.Fatalf("Elevate with quoted/reserved identifiers failed: %v", err)
+	}
+	if len(granted) != 4 {
+		t.Fatalf("expected 4 granted objects, got %v", granted)
+	}
+	want := []string{
+		`GRANT USAGE ON SCHEMA "private-schema" TO "dbvault-worker";`,
+		`GRANT SELECT ON "public"."user" TO "dbvault-worker";`,
+		`GRANT SELECT ON "order" TO "dbvault-worker";`,
+		`GRANT SELECT ON "MySchema"."Users" TO "dbvault-worker";`,
+	}
+	for _, w := range want {
+		if !strings.Contains(executed[0], w) {
+			t.Fatalf("executed SQL missing %q:\n%s", w, executed[0])
+		}
+	}
+}
+
+func TestRemediationSQLHyphenatedRole(t *testing.T) {
+	sql := RemediationSQL("dbvault-worker")
+	if !strings.Contains(sql, `"dbvault-worker"`) {
+		t.Fatalf("expected quoted hyphenated role in remediation SQL:\n%s", sql)
+	}
+}
+

@@ -10,8 +10,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-VERSION="${DBVAULT_VERSION:-0.2.0}"
+VERSION="${DBVAULT_VERSION:-0.2.3}"
 PACKAGE_NAME="dbvault-vps-installer.tar.gz"
+export GOMAXPROCS="${GOMAXPROCS:-2}"
 
 echo "==> Building web assets..."
 npm --prefix "${ROOT_DIR}/web" run build
@@ -22,6 +23,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o "${ROOT_DIR}/bin/dbvault" \
     "${ROOT_DIR}/cmd/dbvault"
+
+cp "${ROOT_DIR}/bin/dbvault" "${DIST_DIR}/dbvault-linux-amd64"
+chmod +x "${DIST_DIR}/dbvault-linux-amd64"
 
 echo "==> Preparing VPS deployment package..."
 TMP_PKG_DIR="$(mktemp -d /tmp/dbvault-pkg.XXXXXX)"
@@ -39,6 +43,7 @@ tar -czf "${DIST_DIR}/${PACKAGE_NAME}" -C "${TMP_PKG_DIR}/dbvault-installer" .
 echo ""
 echo "=================================================================="
 echo " ✓ VPS Deployment package created successfully!"
+echo " Binary:  ${DIST_DIR}/dbvault-linux-amd64 ($(du -h "${DIST_DIR}/dbvault-linux-amd64" | awk '{print $1}'))"
 echo " Package: ${DIST_DIR}/${PACKAGE_NAME} ($(du -h "${DIST_DIR}/${PACKAGE_NAME}" | awk '{print $1}'))"
 echo "=================================================================="
 echo ""
